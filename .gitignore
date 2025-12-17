@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+ENV/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.env.local
+*.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Build outputs
+*.egg
+*.whl
+
+# Database
+*.db
+*.sqlite3
+
+# Uploads and generated files
+static/uploads/*
+static/heatmaps/*
+!static/uploads/.gitkeep
+!static/heatmaps/.gitkeep
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Coverage
+.coverage
+htmlcov/
+
+# Pytest
+.pytest_cache/
+
+# Alembic
+alembic/versions/*.pyc
+backend/dfp_model/
+backend/yolo_floorplan/
+backend/sam_model/*.pth
+*.pth

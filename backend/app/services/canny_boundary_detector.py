@@ -135,7 +135,195 @@ class CannyBoundaryDetector:
             all_y = [w[1] for w in walls] + [w[3] for w in walls]
             self._floor_plan_bounds = (min(all_x), min(all_y), max(all_x), max(all_y))
 
+        # Post-process: merge collinear segments and extend to corners
+        logger.info(f"Post-processing {len(walls)} walls...")
+        walls = self._post_process_walls(walls)
+        logger.info(f"  After post-processing: {len(walls)} walls")
+
         return walls
+
+    def _post_process_walls(self, walls: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+        """Post-process walls: merge collinear segments and extend to corners."""
+        if not walls:
+            return walls
+
+        # Separate horizontal and vertical walls
+        h_walls = [(x1, y1, x2, y2) for x1, y1, x2, y2 in walls if y1 == y2]
+        v_walls = [(x1, y1, x2, y2) for x1, y1, x2, y2 in walls if x1 == x2]
+
+        # Merge collinear segments
+        merged_h = self._merge_collinear_horizontal(h_walls)
+        merged_v = self._merge_collinear_vertical(v_walls)
+
+        # Extend walls to meet at corners
+        extended_h, extended_v = self._extend_to_corners(merged_h, merged_v)
+
+        # Connect nearby endpoints
+        connected_h, connected_v = self._connect_nearby_endpoints(extended_h, extended_v)
+
+        return connected_h + connected_v
+
+    def _merge_collinear_horizontal(self, walls: List[Tuple], gap_threshold: int = 60, y_tolerance: int = 20) -> List[Tuple]:
+        """Merge horizontal walls that are on the same line and close together."""
+        if not walls:
+            return []
+
+        # Group by y-coordinate (with tolerance)
+        groups = {}
+        for x1, y1, x2, y2 in walls:
+            y = y1
+            found = False
+            for key in list(groups.keys()):
+                if abs(key - y) <= y_tolerance:
+                    groups[key].append((min(x1, x2), max(x1, x2), y))
+                    found = True
+                    break
+            if not found:
+                groups[y] = [(min(x1, x2), max(x1, x2), y)]
+
+        merged = []
+        for y_key, segments in groups.items():
+            segments.sort(key=lambda s: s[0])
+            current = list(segments[0])
+            for x1, x2, y in segments[1:]:
+                if x1 <= current[1] + gap_threshold:
+                    current[1] = max(current[1], x2)
+                    current[2] = (current[2] + y) // 2  # Average y
+                else:
+                    merged.append((current[0], current[2], current[1], current[2]))
+                    current = [x1, x2, y]
+            merged.append((current[0], current[2], current[1], current[2]))
+
+        return merged
+
+    def _merge_collinear_vertical(self, walls: List[Tuple], gap_threshold: int = 60, x_tolerance: int = 20) -> List[Tuple]:
+        """Merge vertical walls that are on the same line and close together."""
+        if not walls:
+            return []
+
+        # Group by x-coordinate (with tolerance)
+        groups = {}
+        for x1, y1, x2, y2 in walls:
+            x = x1
+            found = False
+            for key in list(groups.keys()):
+                if abs(key - x) <= x_tolerance:
+                    groups[key].append((min(y1, y2), max(y1, y2), x))
+                    found = True
+                    break
+            if not found:
+                groups[x] = [(min(y1, y2), max(y1, y2), x)]
+
+        merged = []
+        for x_key, segments in groups.items():
+            segments.sort(key=lambda s: s[0])
+            current = list(segments[0])
+            for y1, y2, x in segments[1:]:
+                if y1 <= current[1] + gap_threshold:
+                    current[1] = max(current[1], y2)
+                    current[2] = (current[2] + x) // 2  # Average x
+                else:
+                    merged.append((current[2], current[0], current[2], current[1]))
+                    current = [y1, y2, x]
+            merged.append((current[2], current[0], current[2], current[1]))
+
+        return merged
+
+    def _extend_to_corners(
+        self,
+        h_walls: List[Tuple],
+        v_walls: List[Tuple],
+        snap_distance: int = 50
+    ) -> Tuple[List[Tuple], List[Tuple]]:
+        """Extend walls to meet at corners where they're close."""
+        extended_h = []
+        extended_v = list(v_walls)
+
+        for hx1, hy, hx2, _ in h_walls:
+            new_x1, new_x2 = hx1, hx2
+
+            # Check if left end should extend to meet a vertical wall
+            for i, (vx, vy1, _, vy2) in enumerate(extended_v):
+                # Left end of H meets V
+                if abs(hx1 - vx) <= snap_distance and vy1 <= hy <= vy2:
+                    new_x1 = vx
+                # Right end of H meets V
+                if abs(hx2 - vx) <= snap_distance and vy1 <= hy <= vy2:
+                    new_x2 = vx
+
+            extended_h.append((new_x1, hy, new_x2, hy))
+
+        # Now extend vertical walls to meet horizontal
+        final_v = []
+        for vx, vy1, _, vy2 in extended_v:
+            new_y1, new_y2 = vy1, vy2
+
+            for hx1, hy, hx2, _ in extended_h:
+                # Top end of V meets H
+                if abs(vy1 - hy) <= snap_distance and hx1 <= vx <= hx2:
+                    new_y1 = hy
+                # Bottom end of V meets H
+                if abs(vy2 - hy) <= snap_distance and hx1 <= vx <= hx2:
+                    new_y2 = hy
+
+            final_v.append((vx, new_y1, vx, new_y2))
+
+        return extended_h, final_v
+
+    def _connect_nearby_endpoints(
+        self,
+        h_walls: List[Tuple],
+        v_walls: List[Tuple],
+        connect_distance: int = 40
+    ) -> Tuple[List[Tuple], List[Tuple]]:
+        """Connect wall endpoints that are close to each other."""
+        # Build list of all endpoints
+        h_endpoints = []  # (wall_idx, is_start, x, y)
+        for i, (x1, y, x2, _) in enumerate(h_walls):
+            h_endpoints.append((i, True, x1, y))   # start
+            h_endpoints.append((i, False, x2, y))  # end
+
+        v_endpoints = []
+        for i, (x, y1, _, y2) in enumerate(v_walls):
+            v_endpoints.append((i, True, x, y1))   # start (top)
+            v_endpoints.append((i, False, x, y2))  # end (bottom)
+
+        # Convert to mutable lists
+        new_h = [list(w) for w in h_walls]
+        new_v = [list(w) for w in v_walls]
+
+        # For each H endpoint, find nearby V endpoints to connect
+        for h_idx, is_start, hx, hy in h_endpoints:
+            for v_idx, v_is_start, vx, vy in v_endpoints:
+                dist = np.sqrt((hx - vx)**2 + (hy - vy)**2)
+                if dist <= connect_distance and dist > 0:
+                    # Snap H wall endpoint to V wall
+                    if is_start:
+                        new_h[h_idx][0] = vx  # x1
+                        new_h[h_idx][1] = vy  # y1
+                    else:
+                        new_h[h_idx][2] = vx  # x2
+                        new_h[h_idx][3] = vy  # y2 (keep same as y1 for H)
+
+                    # Snap V wall endpoint to H wall
+                    if v_is_start:
+                        new_v[v_idx][1] = hy  # y1
+                    else:
+                        new_v[v_idx][3] = hy  # y2
+
+        # Convert back to tuples and ensure H walls have same y
+        result_h = []
+        for x1, y1, x2, y2 in new_h:
+            avg_y = (y1 + y2) // 2
+            result_h.append((x1, avg_y, x2, avg_y))
+
+        # Ensure V walls have same x
+        result_v = []
+        for x1, y1, x2, y2 in new_v:
+            avg_x = (x1 + x2) // 2
+            result_v.append((avg_x, y1, avg_x, y2))
+
+        return result_h, result_v
 
     def _detect_walls_fallback(self, gray: np.ndarray, w: int, h: int) -> List[Tuple[int, int, int, int]]:
         """Fallback wall detection using edge detection if skimage not available."""

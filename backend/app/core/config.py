@@ -20,6 +20,18 @@ class Settings(BaseSettings):
     # AI Model Selection: "opus" for max accuracy, "sonnet" for speed/cost balance
     AI_WALL_DETECTION_MODEL: str = "opus"  # Options: "opus", "sonnet"
 
+    # Wall Detection Mode - choose the approach that works best for your floor plans:
+    # - "hybrid": Contour boundary + Rasterscan interior (DEFAULT - best overall accuracy)
+    # - "rasterscan": HuggingFace Space API (interior walls only)
+    # - "deepfloorplan": Pre-trained TFLite model (local, no API needed)
+    # - "boundary": Finds outer boundary first, then interior walls
+    # - "morphological": Thickness-based isolation (fast, good for clean CAD exports)
+    # - "lsd": Line Segment Detector (detects many lines, may need filtering)
+    # - "combined": AI + Morphological merged
+    # - "ai_vision": Direct Claude Vision detection
+    # - "cv": Basic Hough transform fallback
+    WALL_DETECTION_MODE: str = "hybrid"
+
     # Database
     DATABASE_URL: str = "postgresql://router_user:router_password@localhost:5432/router_optimizer"
 

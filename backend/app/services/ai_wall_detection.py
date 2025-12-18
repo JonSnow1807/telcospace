@@ -36,6 +36,20 @@ WALL_DETECTION_PROMPT = """You are a CAD digitization expert. Convert this floor
 
 **YOUR TASK:** Extract EVERY wall as a line segment with EXACT pixel coordinates.
 
+**DETECTION ORDER - FOLLOW THIS EXACTLY:**
+
+**STEP 1: OUTER BOUNDARY (PERIMETER) - DO THIS FIRST!**
+- Trace the COMPLETE outer edge of the floor plan
+- Start at one corner and go around the entire perimeter
+- The outer boundary forms a closed polygon (may be rectangular, L-shaped, or irregular)
+- Every corner of the building exterior must have connecting walls
+- This is the most important step - do not skip any exterior walls!
+
+**STEP 2: INTERIOR WALLS**
+- Walls that divide the interior into rooms
+- Must connect to the outer boundary or other interior walls
+- Include walls between: bedrooms, bathrooms, kitchen, living room, hallways, closets
+
 **CRITICAL RULES FOR CAD-QUALITY OUTPUT:**
 
 1. **TRACE THE CENTER LINE** of each wall (middle of the thick black/dark line)
@@ -55,7 +69,7 @@ WALL_DETECTION_PROMPT = """You are a CAD digitization expert. Convert this floor
 
 5. **WHAT IS A WALL:**
    - Thick black/dark lines forming room boundaries
-   - Exterior building outline
+   - EXTERIOR BUILDING OUTLINE (the perimeter - most important!)
    - Interior room dividers
    - Include wall even where there are door/window openings
 
@@ -75,15 +89,20 @@ WALL_DETECTION_PROMPT = """You are a CAD digitization expert. Convert this floor
   ]
 }
 
-**EXAMPLE - L-shaped room walls:**
-- {"x1": 100, "y1": 100, "x2": 500, "y2": 100}  // top horizontal
-- {"x1": 500, "y1": 100, "x2": 500, "y2": 400}  // right vertical (shares 500,100)
-- {"x1": 500, "y1": 400, "x2": 100, "y2": 400}  // bottom horizontal
-- {"x1": 100, "y1": 400, "x2": 100, "y2": 100}  // left vertical (closes loop)
+**EXAMPLE - L-shaped apartment with outer boundary + interior:**
+Outer boundary (must form closed loop):
+- {"x1": 20, "y1": 20, "x2": 300, "y2": 20}    // top
+- {"x1": 300, "y1": 20, "x2": 300, "y2": 200}  // right upper
+- {"x1": 300, "y1": 200, "x2": 400, "y2": 200} // step out
+- {"x1": 400, "y1": 200, "x2": 400, "y2": 400} // right lower
+- {"x1": 400, "y1": 400, "x2": 20, "y2": 400}  // bottom
+- {"x1": 20, "y1": 400, "x2": 20, "y2": 20}    // left (closes loop)
 
-Note: (500, 100) appears in walls 1 and 2 - they connect precisely at the corner.
+Interior walls:
+- {"x1": 150, "y1": 20, "x2": 150, "y2": 200}  // bedroom divider
+- {"x1": 20, "y1": 200, "x2": 300, "y2": 200}  // horizontal divider
 
-Analyze the floor plan and return ALL walls as JSON."""
+Analyze the floor plan. First trace the COMPLETE outer boundary, then all interior walls. Return as JSON."""
 
 
 class AIWallDetector:

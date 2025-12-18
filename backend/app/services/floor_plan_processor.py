@@ -60,6 +60,67 @@ try:
 except ImportError:
     AI_DETECTION_AVAILABLE = False
 
+# Hybrid AI + Graph algorithm detection (best quality)
+try:
+    from app.services.hybrid_wall_detection import HybridWallDetector
+    HYBRID_DETECTION_AVAILABLE = True
+except ImportError:
+    HYBRID_DETECTION_AVAILABLE = False
+
+# Combined AI + Morphological detection
+try:
+    from app.services.combined_wall_detection import CombinedWallDetector
+    COMBINED_DETECTION_AVAILABLE = True
+except ImportError:
+    COMBINED_DETECTION_AVAILABLE = False
+
+# Morphological detection (pure CV)
+try:
+    from app.services.morphological_wall_detection import MorphologicalWallDetector
+    MORPHOLOGICAL_DETECTION_AVAILABLE = True
+except ImportError:
+    MORPHOLOGICAL_DETECTION_AVAILABLE = False
+
+# Boundary-first detection (most logical for floor plans)
+try:
+    from app.services.boundary_wall_detection import BoundaryWallDetector
+    BOUNDARY_DETECTION_AVAILABLE = True
+except ImportError:
+    BOUNDARY_DETECTION_AVAILABLE = False
+
+# LSD (Line Segment Detector)
+try:
+    from app.services.lsd_wall_detection import LSDWallDetector
+    LSD_DETECTION_AVAILABLE = True
+except ImportError:
+    LSD_DETECTION_AVAILABLE = False
+
+# DeepFloorplan (pre-trained TFLite model)
+try:
+    from app.services.deepfloorplan_detector import DeepFloorplanDetector, DFP_AVAILABLE
+except ImportError:
+    DFP_AVAILABLE = False
+
+# Rasterscan (HuggingFace Space - best accuracy)
+try:
+    from app.services.rasterscan_detector import RasterscanDetector, RASTERSCAN_AVAILABLE
+except ImportError:
+    RASTERSCAN_AVAILABLE = False
+
+# Canny Boundary (pure CV - stable and reliable)
+try:
+    from app.services.canny_boundary_detector import CannyBoundaryDetector, CANNY_BOUNDARY_AVAILABLE
+except ImportError:
+    CANNY_BOUNDARY_AVAILABLE = False
+
+# Hybrid Boundary (Contour + Rasterscan - may cause segfaults)
+try:
+    from app.services.hybrid_boundary_detector import HybridBoundaryDetector, HYBRID_BOUNDARY_AVAILABLE
+except ImportError:
+    HYBRID_BOUNDARY_AVAILABLE = False
+
+from app.core.config import settings
+
 # Supported file extensions
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.webp'}
 CAD_EXTENSIONS = {'.dxf', '.dwg', '.ifc'}
@@ -104,21 +165,126 @@ class FloorPlanProcessor:
         self.ocr_service = OCRService()
         self.scale_detector = ScaleDetector()
 
-        # AI detection (Claude Vision) - PRIMARY detector for best accuracy
-        self.use_ai_detection = use_ai_detection and AI_DETECTION_AVAILABLE
+        # Get detection mode from config
+        detection_mode = getattr(settings, 'WALL_DETECTION_MODE', 'hybrid').lower()
+        logger.info(f"Wall detection mode from config: {detection_mode}")
+
+        # Canny Boundary (pure CV - stable, no external APIs)
+        self.use_canny_boundary = (detection_mode == 'hybrid') and CANNY_BOUNDARY_AVAILABLE
+        self.canny_boundary_detector = None
+
+        if self.use_canny_boundary:
+            try:
+                self.canny_boundary_detector = CannyBoundaryDetector()
+                logger.info("Canny Boundary detection enabled (PRIMARY - pure CV, stable)")
+            except Exception as e:
+                logger.warning(f"Canny Boundary detection not available: {e}")
+                self.use_canny_boundary = False
+
+        # Hybrid Boundary (Contour + Rasterscan - may cause segfaults, disabled by default)
+        self.use_hybrid_boundary = False  # Disabled due to stability issues
+        self.hybrid_boundary_detector = None
+
+        # Rasterscan (HuggingFace Space - interior walls only)
+        self.use_rasterscan = (detection_mode == 'rasterscan') and RASTERSCAN_AVAILABLE
+        self.rasterscan_detector = None
+
+        if self.use_rasterscan:
+            try:
+                self.rasterscan_detector = RasterscanDetector()
+                logger.info("Rasterscan detection enabled (HuggingFace Space API)")
+            except Exception as e:
+                logger.warning(f"Rasterscan detection not available: {e}")
+                self.use_rasterscan = False
+
+        # DeepFloorplan (pre-trained TFLite model - local fallback)
+        self.use_deepfloorplan = (detection_mode == 'deepfloorplan') and DFP_AVAILABLE
+        self.deepfloorplan_detector = None
+
+        if self.use_deepfloorplan:
+            try:
+                self.deepfloorplan_detector = DeepFloorplanDetector()
+                logger.info("DeepFloorplan detection enabled (PRIMARY - pre-trained model)")
+            except Exception as e:
+                logger.warning(f"DeepFloorplan detection not available: {e}")
+                self.use_deepfloorplan = False
+
+        # Boundary detection (finds outer boundary first, then interior walls)
+        self.use_boundary = (detection_mode == 'boundary') and BOUNDARY_DETECTION_AVAILABLE
+        self.boundary_detector = None
+
+        if self.use_boundary:
+            try:
+                self.boundary_detector = BoundaryWallDetector()
+                logger.info("Boundary wall detection enabled (PRIMARY)")
+            except Exception as e:
+                logger.warning(f"Boundary detection not available: {e}")
+                self.use_boundary = False
+
+        # Morphological detection (pure CV, thickness-based)
+        self.use_morphological = (detection_mode == 'morphological') and MORPHOLOGICAL_DETECTION_AVAILABLE
+        self.morphological_detector = None
+
+        if self.use_morphological:
+            try:
+                self.morphological_detector = MorphologicalWallDetector()
+                logger.info("Morphological wall detection enabled")
+            except Exception as e:
+                logger.warning(f"Morphological detection not available: {e}")
+                self.use_morphological = False
+
+        # LSD detection (Line Segment Detector)
+        self.use_lsd = (detection_mode == 'lsd') and LSD_DETECTION_AVAILABLE
+        self.lsd_detector = None
+
+        if self.use_lsd:
+            try:
+                self.lsd_detector = LSDWallDetector()
+                logger.info("LSD wall detection enabled")
+            except Exception as e:
+                logger.warning(f"LSD detection not available: {e}")
+                self.use_lsd = False
+
+        # Combined detection (AI + Morphological merged)
+        self.use_combined = (detection_mode == 'combined') and COMBINED_DETECTION_AVAILABLE
+        self.combined_detector = None
+
+        if self.use_combined:
+            try:
+                self.combined_detector = CombinedWallDetector()
+                logger.info("Combined AI+Morphological wall detection enabled")
+            except Exception as e:
+                logger.warning(f"Combined detection not available: {e}")
+                self.use_combined = False
+
+        # AI detection (Claude Vision)
+        self.use_ai_detection = (detection_mode == 'ai_vision') and AI_DETECTION_AVAILABLE
         self.ai_detector = None
 
         if self.use_ai_detection:
             try:
                 self.ai_detector = AIWallDetector()
-                logger.info("Claude Vision wall detection enabled (PRIMARY)")
+                logger.info("Claude Vision wall detection enabled")
             except Exception as e:
                 logger.warning(f"AI detection not available: {e}")
                 self.use_ai_detection = False
 
+        # Hybrid detection (AI + Graph algorithms) - legacy
+        self.use_hybrid = (detection_mode == 'hybrid') and HYBRID_DETECTION_AVAILABLE
+        self.hybrid_detector = None
+
+        if self.use_hybrid:
+            try:
+                self.hybrid_detector = HybridWallDetector()
+                logger.info("Hybrid AI+Graph wall detection enabled")
+            except Exception as e:
+                logger.warning(f"Hybrid detection not available: {e}")
+                self.use_hybrid = False
+
         # SAM - pixel-perfect segmentation (fallback if AI fails)
+        # Skip SAM when canny_boundary is enabled (it's slow to load and not needed)
         logger.info(f"FloorPlanProcessor init: use_sam={use_sam}, SAM_AVAILABLE={SAM_AVAILABLE}")
-        self.use_sam = use_sam and SAM_AVAILABLE and not self.use_ai_detection
+        self.use_sam = use_sam and SAM_AVAILABLE and not self.use_ai_detection and not self.use_canny_boundary
         self.sam_detector = None
 
         if self.use_sam:
@@ -129,10 +295,13 @@ class FloorPlanProcessor:
             except Exception as e:
                 logger.error(f"SAM initialization failed: {e}", exc_info=True)
                 self.use_sam = False
+        elif self.use_canny_boundary:
+            logger.info("SAM skipped (canny_boundary mode active)")
 
         # YOLOv8 - trained specifically on floor plans (fallback)
+        # Skip YOLO when canny_boundary is enabled
         logger.info(f"FloorPlanProcessor init: use_yolo={use_yolo}, YOLO_AVAILABLE={YOLO_AVAILABLE}")
-        self.use_yolo = use_yolo and YOLO_AVAILABLE and not self.use_ai_detection and not self.use_sam
+        self.use_yolo = use_yolo and YOLO_AVAILABLE and not self.use_ai_detection and not self.use_sam and not self.use_canny_boundary
         self.yolo_detector = None
 
         if self.use_yolo:
@@ -142,6 +311,8 @@ class FloorPlanProcessor:
             except Exception as e:
                 logger.warning(f"YOLO not available: {e}")
                 self.use_yolo = False
+        elif self.use_canny_boundary:
+            logger.info("YOLO skipped (canny_boundary mode active)")
 
         # Fallback to CV-based detection
         if use_improved_detector:
@@ -294,16 +465,19 @@ class FloorPlanProcessor:
         height, width = image.shape[:2]
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        # Step 1: OCR extraction
-        progress_callback(15, "Extracting text with OCR...")
-        try:
-            room_labels, dimensions, scale_text = self.ocr_service.extract_annotations(image)
-            ocr_results = self.ocr_service.extract_all_text(image)
-        except Exception as e:
-            logger.warning(f"OCR extraction failed: {e}")
-            room_labels, dimensions, scale_text = [], [], None
-            ocr_results = []
-            warnings.append(f"OCR extraction failed: {str(e)}")
+        # Step 1: OCR extraction (disabled to avoid segfaults from EasyOCR in forked processes)
+        progress_callback(15, "Skipping OCR (stability mode)...")
+        room_labels, dimensions, scale_text = [], [], None
+        ocr_results = []
+        # OCR disabled - EasyOCR causes SIGSEGV in forked Celery workers
+        # try:
+        #     room_labels, dimensions, scale_text = self.ocr_service.extract_annotations(image)
+        #     ocr_results = self.ocr_service.extract_all_text(image)
+        # except Exception as e:
+        #     logger.warning(f"OCR extraction failed: {e}")
+        #     room_labels, dimensions, scale_text = [], [], None
+        #     ocr_results = []
+        #     warnings.append(f"OCR extraction failed: {str(e)}")
 
         # Step 2: Scale detection
         progress_callback(35, "Detecting scale...")
@@ -333,8 +507,125 @@ class FloorPlanProcessor:
         detection_method = None
         walls = None
 
-        # Priority 1: Claude Vision (AI - most accurate)
-        if self.use_ai_detection and self.ai_detector:
+        # Priority 0: Canny Boundary (pure CV - stable and reliable)
+        if self.use_canny_boundary and self.canny_boundary_detector:
+            progress_callback(55, "Detecting walls with Canny boundary...")
+            try:
+                logger.info(f"Calling Canny Boundary detector with scale={scale}")
+                walls, cb_rooms = self.canny_boundary_detector.detect_walls(image, scale)
+                if walls is not None and len(walls) > 0:
+                    if cb_rooms and not rooms:
+                        rooms = cb_rooms
+                    detection_method = "canny_boundary"
+                    logger.info(f"Canny detected {len(walls)} walls, {len(cb_rooms)} rooms")
+                else:
+                    walls = None
+            except Exception as e:
+                import traceback
+                logger.error(f"Canny Boundary detection failed: {e}")
+                logger.error(traceback.format_exc())
+                walls = None
+
+        # Priority 1: Rasterscan (HuggingFace Space - interior walls)
+        if walls is None and self.use_rasterscan and self.rasterscan_detector:
+            progress_callback(55, "Detecting walls with Rasterscan API...")
+            try:
+                logger.info(f"Calling Rasterscan detector with scale={scale}")
+                walls, rs_rooms = self.rasterscan_detector.detect_walls(image, scale)
+                if walls is not None and len(walls) > 0:
+                    if rs_rooms and not rooms:
+                        rooms = rs_rooms
+                    detection_method = "rasterscan"
+                    logger.info(f"Rasterscan detected {len(walls)} walls, {len(rs_rooms)} rooms")
+                else:
+                    walls = None
+            except Exception as e:
+                import traceback
+                logger.error(f"Rasterscan detection failed: {e}")
+                logger.error(traceback.format_exc())
+                walls = None
+
+        # Priority 1: DeepFloorplan (pre-trained model - local fallback)
+        if walls is None and self.use_deepfloorplan and self.deepfloorplan_detector:
+            progress_callback(55, "Detecting walls with DeepFloorplan model...")
+            try:
+                logger.info(f"Calling DeepFloorplan detector with scale={scale}")
+                walls, dfp_rooms = self.deepfloorplan_detector.detect_walls(image, scale)
+                if walls is not None and len(walls) > 0:
+                    if dfp_rooms and not rooms:
+                        rooms = dfp_rooms
+                    detection_method = "deepfloorplan"
+                    logger.info(f"DeepFloorplan detected {len(walls)} walls, {len(dfp_rooms)} rooms")
+                else:
+                    walls = None
+            except Exception as e:
+                import traceback
+                logger.error(f"DeepFloorplan detection failed: {e}")
+                logger.error(traceback.format_exc())
+                walls = None
+
+        # Priority 1: Boundary detection (outer boundary first, then interior)
+        if walls is None and self.use_boundary and self.boundary_detector:
+            progress_callback(55, "Detecting walls with Boundary method...")
+            try:
+                logger.info(f"Calling Boundary detector with scale={scale}")
+                walls, boundary_rooms = self.boundary_detector.detect_walls(image, scale)
+                if walls is not None and len(walls) > 0:
+                    detection_method = "boundary"
+                    logger.info(f"Boundary detected {len(walls)} walls")
+                else:
+                    walls = None
+            except Exception as e:
+                import traceback
+                logger.error(f"Boundary detection failed: {e}")
+                walls = None
+
+        # Priority 1: Morphological (thickness-based)
+        if walls is None and self.use_morphological and self.morphological_detector:
+            progress_callback(55, "Detecting walls with Morphological...")
+            try:
+                walls, morph_rooms = self.morphological_detector.detect_walls(image, scale)
+                if walls is not None and len(walls) > 0:
+                    detection_method = "morphological"
+                    logger.info(f"Morphological detected {len(walls)} walls")
+                else:
+                    walls = None
+            except Exception as e:
+                logger.error(f"Morphological detection failed: {e}")
+                walls = None
+
+        # Priority 2: LSD (Line Segment Detector)
+        if walls is None and self.use_lsd and self.lsd_detector:
+            progress_callback(55, "Detecting walls with LSD...")
+            try:
+                walls, lsd_rooms = self.lsd_detector.detect_walls(image, scale)
+                if walls is not None and len(walls) > 0:
+                    detection_method = "lsd"
+                    logger.info(f"LSD detected {len(walls)} walls")
+                else:
+                    walls = None
+            except Exception as e:
+                logger.error(f"LSD detection failed: {e}")
+                walls = None
+
+        # Priority 3: Combined AI + Morphological
+        if walls is None and self.use_combined and self.combined_detector:
+            progress_callback(55, "Detecting walls with Combined AI+Morphological...")
+            try:
+                walls, combined_rooms = self.combined_detector.detect_walls(image, scale)
+                if walls is not None and len(walls) > 0:
+                    if combined_rooms and not rooms:
+                        rooms = combined_rooms
+                    detection_method = "combined"
+                    logger.info(f"Combined detected {len(walls)} walls")
+                else:
+                    walls = None
+            except Exception as e:
+                logger.error(f"Combined detection failed: {e}")
+                walls = None
+
+        # Priority 4: Claude Vision (AI)
+        if walls is None and self.use_ai_detection and self.ai_detector:
             progress_callback(55, "Detecting walls with AI Vision...")
             try:
                 logger.info(f"Calling AI detector with scale={scale}, image shape={image.shape}")

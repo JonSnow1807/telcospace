@@ -69,3 +69,7 @@ backend/dfp_model/
 backend/yolo_floorplan/
 backend/sam_model/*.pth
 *.pth
+
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md

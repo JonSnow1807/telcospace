@@ -44,6 +44,25 @@ class ForbiddenZone(BaseModel):
     reason: Optional[str] = None
 
 
+class PriorityZone(BaseModel):
+    """Zone with higher WiFi coverage priority (e.g., office, living room)."""
+    name: str
+    polygon: List[List[float]] = Field(
+        ...,
+        description="Zone boundary as list of [x, y] coordinates in pixels"
+    )
+    priority: float = Field(
+        1.5,
+        ge=1.0,
+        le=5.0,
+        description="Priority multiplier (1.0 = normal, 5.0 = highest priority)"
+    )
+    min_signal_dbm: Optional[float] = Field(
+        None,
+        description="Minimum required signal strength in this zone (overrides global)"
+    )
+
+
 class MapDimensions(BaseModel):
     """Floor plan dimensions in pixels."""
     width: int = Field(..., gt=0)
@@ -56,6 +75,7 @@ class MapData(BaseModel):
     walls: List[WallSegment] = Field(default_factory=list)
     rooms: List[Room] = Field(default_factory=list)
     forbidden_zones: List[ForbiddenZone] = Field(default_factory=list)
+    priority_zones: List[PriorityZone] = Field(default_factory=list)
 
 
 class ProjectBase(BaseModel):

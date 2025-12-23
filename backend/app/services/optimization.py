@@ -156,8 +156,16 @@ class GeneticOptimizer:
         # Sort final population
         population.sort(key=lambda x: x.fitness, reverse=True)
 
-        # Return top diverse solutions
-        return self._get_diverse_solutions(population, count=5)
+        # Apply local search refinement to top solutions
+        top_solutions = self._get_diverse_solutions(population, count=5)
+        refined_solutions = []
+        for solution in top_solutions:
+            refined = self._local_search(solution)
+            refined_solutions.append(refined)
+
+        # Re-sort after local search
+        refined_solutions.sort(key=lambda x: x.fitness, reverse=True)
+        return refined_solutions
 
     def _initialize_population(self) -> List[Individual]:
         """
@@ -401,6 +409,7 @@ class GeneticOptimizer:
         - Cost (minimize)
         - Signal uniformity (maximize)
         - Number of routers (minimize)
+        - Priority zone coverage (maximize)
         """
         if not individual.router_positions:
             individual.fitness = -1000.0
@@ -462,22 +471,27 @@ class GeneticOptimizer:
         max_routers = self.constraints.max_routers or 10
         router_penalty = 1.0 - (len(routers) / max_routers)
 
+        # Priority zone coverage score
+        priority_score = self._calculate_priority_zone_score(signal_grid, grid_res)
+
         # Weighted fitness
         if self.constraints.prioritize_cost:
             # Cost-focused weights
             fitness = (
-                0.4 * (coverage / 100.0) +
-                0.35 * cost_ratio +
+                0.35 * (coverage / 100.0) +
+                0.30 * cost_ratio +
                 0.15 * uniformity +
-                0.1 * router_penalty
+                0.10 * router_penalty +
+                0.10 * priority_score
             )
         else:
             # Coverage-focused weights (default)
             fitness = (
-                0.5 * (coverage / 100.0) +
-                0.2 * cost_ratio +
-                0.2 * uniformity +
-                0.1 * router_penalty
+                0.40 * (coverage / 100.0) +
+                0.15 * cost_ratio +
+                0.20 * uniformity +
+                0.10 * router_penalty +
+                0.15 * priority_score
             )
 
         # Hard constraint penalties
@@ -493,6 +507,184 @@ class GeneticOptimizer:
 
         individual.fitness = fitness
         return fitness
+
+    def _calculate_priority_zone_score(
+        self,
+        signal_grid: SignalGrid,
+        grid_res: int
+    ) -> float:
+        """
+        Calculate weighted coverage score for priority zones.
+
+        Returns a score between 0 and 1 based on how well priority zones are covered.
+        Higher priority zones contribute more to the score.
+        """
+        priority_zones = getattr(self.map_data, 'priority_zones', None)
+        if not priority_zones:
+            return 1.0  # No priority zones defined, return full score
+
+        total_weighted_score = 0.0
+        total_weight = 0.0
+
+        for zone in priority_zones:
+            if not zone.polygon or len(zone.polygon) < 3:
+                continue
+
+            # Use zone-specific min signal or fall back to constraint
+            min_signal = zone.min_signal_dbm or self.constraints.min_signal_strength_dbm
+
+            # Count covered and total points in zone
+            covered_count = 0
+            total_count = 0
+            signal_sum = 0.0
+
+            # Sample points within the zone polygon
+            # Convert polygon to points for point-in-polygon testing
+            polygon_points = np.array(zone.polygon, dtype=np.float32)
+
+            # Get bounding box of zone
+            min_x = max(0, int(np.min(polygon_points[:, 0])))
+            max_x = min(self.width, int(np.max(polygon_points[:, 0])))
+            min_y = max(0, int(np.min(polygon_points[:, 1])))
+            max_y = min(self.height, int(np.max(polygon_points[:, 1])))
+
+            # Sample at grid resolution
+            for y in range(min_y, max_y, grid_res):
+                for x in range(min_x, max_x, grid_res):
+                    # Check if point is inside polygon
+                    if self._point_in_polygon(x, y, polygon_points):
+                        total_count += 1
+
+                        # Get signal at this point from grid
+                        grid_y = y // grid_res
+                        grid_x = x // grid_res
+
+                        if (0 <= grid_y < signal_grid.grid.shape[0] and
+                            0 <= grid_x < signal_grid.grid.shape[1]):
+                            signal = signal_grid.grid[grid_y, grid_x]
+                            signal_sum += signal
+
+                            if signal >= min_signal:
+                                covered_count += 1
+
+            # Calculate zone coverage
+            if total_count > 0:
+                zone_coverage = covered_count / total_count
+                avg_signal = signal_sum / total_count
+
+                # Weight by zone priority
+                # Higher priority zones have more impact on the score
+                weight = zone.priority
+
+                # Score includes coverage and signal quality
+                # Bonus for exceeding min signal threshold
+                signal_bonus = max(0, (avg_signal - min_signal) / 20.0)  # Normalize to ~0-1
+                zone_score = zone_coverage + 0.2 * min(signal_bonus, 0.5)
+                zone_score = min(zone_score, 1.0)
+
+                total_weighted_score += zone_score * weight
+                total_weight += weight
+
+        if total_weight == 0:
+            return 1.0
+
+        return total_weighted_score / total_weight
+
+    def _point_in_polygon(
+        self,
+        x: float,
+        y: float,
+        polygon: np.ndarray
+    ) -> bool:
+        """
+        Check if a point is inside a polygon using ray casting algorithm.
+        """
+        n = len(polygon)
+        inside = False
+
+        j = n - 1
+        for i in range(n):
+            xi, yi = polygon[i]
+            xj, yj = polygon[j]
+
+            if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                inside = not inside
+
+            j = i
+
+        return inside
+
+    def _local_search(
+        self,
+        individual: Individual,
+        max_iterations: int = 50
+    ) -> Individual:
+        """
+        Refine solution using hill climbing local search.
+
+        Moves each router in 8 directions with decreasing step sizes,
+        keeping improvements and rejecting worse positions.
+        """
+        best = individual.copy()
+        self._evaluate_fitness(best)
+
+        # Step sizes for progressive refinement (pixels)
+        step_sizes = [20, 10, 5, 2]
+
+        # 8 directions (N, NE, E, SE, S, SW, W, NW)
+        directions = [
+            (0, -1), (1, -1), (1, 0), (1, 1),
+            (0, 1), (-1, 1), (-1, 0), (-1, -1)
+        ]
+
+        for step_size in step_sizes:
+            improved = True
+            iterations = 0
+
+            while improved and iterations < max_iterations:
+                improved = False
+                iterations += 1
+
+                # Try to improve each router position
+                for router_idx in range(len(best.router_positions)):
+                    current_pos = best.router_positions[router_idx]
+                    best_pos = current_pos
+                    best_local_fitness = best.fitness
+
+                    # Try each direction
+                    for dx, dy in directions:
+                        new_x = current_pos[0] + dx * step_size
+                        new_y = current_pos[1] + dy * step_size
+
+                        # Check bounds
+                        if not (10 <= new_x < self.width - 10 and
+                                10 <= new_y < self.height - 10):
+                            continue
+
+                        # Check if valid position
+                        ix, iy = int(new_x), int(new_y)
+                        if not (0 <= ix < self.width and 0 <= iy < self.height):
+                            continue
+                        if not self.valid_mask[iy, ix]:
+                            continue
+
+                        # Create candidate solution
+                        candidate = best.copy()
+                        candidate.router_positions[router_idx] = (new_x, new_y)
+                        self._evaluate_fitness(candidate)
+
+                        # Keep if better
+                        if candidate.fitness > best_local_fitness:
+                            best_pos = (new_x, new_y)
+                            best_local_fitness = candidate.fitness
+
+                    # Apply best move for this router
+                    if best_pos != current_pos:
+                        best.router_positions[router_idx] = best_pos
+                        self._evaluate_fitness(best)
+                        improved = True
+
+        return best
 
     def _selection(self, population: List[Individual]) -> List[Individual]:
         """

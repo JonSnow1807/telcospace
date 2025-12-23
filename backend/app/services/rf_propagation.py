@@ -303,6 +303,82 @@ def calculate_fresnel_obstruction_loss(
         return 20.0
 
 
+def calculate_knife_edge_diffraction_loss(
+    v: float
+) -> float:
+    """
+    Calculate knife-edge diffraction loss using ITU-R P.526 approximation.
+
+    The Fresnel-Kirchhoff diffraction parameter v determines the loss:
+    - v < -0.7: Line-of-sight is clear, minimal loss
+    - v = 0: Grazing incidence (edge of obstruction on LOS)
+    - v > 0: Obstruction blocks LOS, increasing loss
+
+    Formula (for v > -0.7):
+    L = 6.9 + 20*log10(sqrt((v-0.1)^2 + 1) + v - 0.1)
+
+    Args:
+        v: Fresnel-Kirchhoff diffraction parameter
+
+    Returns:
+        Diffraction loss in dB (always >= 0)
+    """
+    if v < -0.7:
+        # Well below LOS, essentially free space
+        return 0.0
+
+    if v < -0.5:
+        # Transition region, interpolate
+        return max(0.0, (v + 0.7) * 3.0)
+
+    # ITU-R P.526-15 approximation formula
+    term = math.sqrt((v - 0.1) ** 2 + 1) + v - 0.1
+    if term <= 0:
+        return 0.0
+
+    loss = 6.9 + 20 * math.log10(term)
+    return max(0.0, loss)
+
+
+def calculate_diffraction_parameter(
+    obstruction_height_m: float,
+    d1_m: float,
+    d2_m: float,
+    wavelength_m: float
+) -> float:
+    """
+    Calculate Fresnel-Kirchhoff diffraction parameter v.
+
+    v = h * sqrt(2 * (d1 + d2) / (λ * d1 * d2))
+
+    Where:
+        h = height of obstruction above line-of-sight (positive = above LOS)
+        d1 = distance from transmitter to obstruction
+        d2 = distance from obstruction to receiver
+        λ = wavelength
+
+    For 2D floor plans, 'height' represents perpendicular distance
+    from the direct path to the diffraction edge.
+
+    Args:
+        obstruction_height_m: Height above LOS in meters (can be negative)
+        d1_m: Distance TX to obstruction in meters
+        d2_m: Distance obstruction to RX in meters
+        wavelength_m: Wavelength in meters
+
+    Returns:
+        Diffraction parameter v
+    """
+    if d1_m <= 0 or d2_m <= 0 or wavelength_m <= 0:
+        return 0.0
+
+    # Fresnel-Kirchhoff parameter
+    v = obstruction_height_m * math.sqrt(
+        2.0 * (d1_m + d2_m) / (wavelength_m * d1_m * d2_m)
+    )
+    return v
+
+
 @dataclass
 class SignalGrid:
     """Grid of signal strength values across the floor plan."""
@@ -345,6 +421,7 @@ class PhysicsEngine:
         environment: str = "residential",
         include_fresnel: bool = True,
         include_reflections: bool = True,
+        include_diffraction: bool = True,
         include_shadow_fading: bool = False,
         shadow_fading_std: float = 4.0
     ):
@@ -354,12 +431,14 @@ class PhysicsEngine:
         self.environment = environment
         self.include_fresnel = include_fresnel
         self.include_reflections = include_reflections
+        self.include_diffraction = include_diffraction
         self.include_shadow_fading = include_shadow_fading
         self.shadow_fading_std = shadow_fading_std
 
         logger.info(
             f"PhysicsEngine initialized: {frequency_ghz}GHz, "
-            f"env={environment}, fresnel={include_fresnel}, reflections={include_reflections}"
+            f"env={environment}, fresnel={include_fresnel}, "
+            f"reflections={include_reflections}, diffraction={include_diffraction}"
         )
 
     def predict_signal(
@@ -453,16 +532,29 @@ class PhysicsEngine:
                         shadow_fading_db
                     )
 
+                    # Collect signal contributions for power addition
+                    signal_contributions = [direct_signal_dbm]
+
                     # Add first-order reflections (single bounce off walls)
-                    signal_dbm = direct_signal_dbm
                     if self.include_reflections and distance_m > 0.5:
                         reflection_contribution = self._calculate_reflection_contribution(
                             router_x, router_y, px, py, walls, scale,
                             tx_power_dbm, tx_antenna_gain, rx_antenna_gain
                         )
                         if reflection_contribution > -100:
-                            # Combine direct and reflected signals (power addition)
-                            signal_dbm = self._power_sum_db([direct_signal_dbm, reflection_contribution])
+                            signal_contributions.append(reflection_contribution)
+
+                    # Add knife-edge diffraction around wall corners
+                    if self.include_diffraction and wall_loss_db > 5.0 and distance_m > 1.0:
+                        diffraction_contribution = self._calculate_diffraction_contribution(
+                            router_x, router_y, px, py, walls, scale,
+                            tx_power_dbm, tx_antenna_gain, rx_antenna_gain
+                        )
+                        if diffraction_contribution > -100:
+                            signal_contributions.append(diffraction_contribution)
+
+                    # Combine all contributions using power addition
+                    signal_dbm = self._power_sum_db(signal_contributions)
 
                     # Take maximum signal (best router at this location)
                     signal_grid[gy, gx] = max(signal_grid[gy, gx], signal_dbm)
@@ -822,6 +914,169 @@ class PhysicsEngine:
                 total_loss += wall_loss
 
         return total_loss
+
+    def _calculate_diffraction_contribution(
+        self,
+        tx_x: float, tx_y: float,
+        rx_x: float, rx_y: float,
+        walls: List[WallSegment],
+        scale: float,
+        tx_power_dbm: float,
+        tx_antenna_gain: float,
+        rx_antenna_gain: float
+    ) -> float:
+        """
+        Calculate signal contribution from knife-edge diffraction around wall corners.
+
+        When direct path is blocked by walls, signals can diffract around corners
+        (wall endpoints). This uses ITU-R P.526 knife-edge diffraction model.
+
+        Returns:
+            Best diffracted signal power in dBm, or -100 if no valid diffraction paths
+        """
+        diffraction_powers = []
+
+        # Find all wall endpoints (potential diffraction edges)
+        corners = set()
+        for wall in walls:
+            corners.add((wall.start.x, wall.start.y))
+            corners.add((wall.end.x, wall.end.y))
+
+        for corner_x, corner_y in corners:
+            # Check if diffraction around this corner provides a valid path
+            # The path TX -> corner -> RX should not pass through walls
+
+            # Distance from TX to corner
+            d1_px = math.sqrt((tx_x - corner_x)**2 + (tx_y - corner_y)**2)
+            # Distance from corner to RX
+            d2_px = math.sqrt((corner_x - rx_x)**2 + (corner_y - rx_y)**2)
+
+            # Skip if corner is too close to TX or RX
+            if d1_px < 20 or d2_px < 20:
+                continue
+
+            # Convert to meters
+            d1_m = d1_px * scale
+            d2_m = d2_px * scale
+
+            # Total diffracted path distance
+            total_distance_m = d1_m + d2_m
+
+            if total_distance_m < 1.0:
+                continue
+
+            # Check wall intersections for the two-segment path
+            # Slightly offset the corner point to avoid false intersections
+            path_to_corner_blocked = False
+            path_from_corner_blocked = False
+
+            for wall in walls:
+                # Check TX to corner segment
+                # Use small epsilon offset to avoid self-intersection at corner
+                if self._line_segment_intersection(
+                    tx_x, tx_y, corner_x, corner_y,
+                    wall.start.x, wall.start.y, wall.end.x, wall.end.y
+                ) is not None:
+                    # Check if intersection is not at the corner itself
+                    if not self._is_wall_endpoint(corner_x, corner_y, wall):
+                        path_to_corner_blocked = True
+                        break
+
+                # Check corner to RX segment
+                if self._line_segment_intersection(
+                    corner_x, corner_y, rx_x, rx_y,
+                    wall.start.x, wall.start.y, wall.end.x, wall.end.y
+                ) is not None:
+                    if not self._is_wall_endpoint(corner_x, corner_y, wall):
+                        path_from_corner_blocked = True
+                        break
+
+            # Skip if either segment is blocked by a wall
+            if path_to_corner_blocked or path_from_corner_blocked:
+                continue
+
+            # Calculate perpendicular distance from direct TX-RX path to corner
+            # This represents the "height" of the diffraction edge
+            obstruction_height_px = self._point_to_line_distance(
+                corner_x, corner_y, tx_x, tx_y, rx_x, rx_y
+            )
+            obstruction_height_m = obstruction_height_px * scale
+
+            # Calculate Fresnel-Kirchhoff diffraction parameter
+            v = calculate_diffraction_parameter(
+                obstruction_height_m,
+                d1_m,
+                d2_m,
+                self.wavelength
+            )
+
+            # Get diffraction loss
+            diffraction_loss_db = calculate_knife_edge_diffraction_loss(v)
+
+            # Skip if diffraction loss is too high
+            if diffraction_loss_db > 30:
+                continue
+
+            # Path loss for diffracted path (longer than direct path)
+            path_loss_db = calculate_itu_p1238_loss(
+                total_distance_m,
+                self.frequency_ghz,
+                self.environment
+            )
+
+            # Calculate diffracted signal power
+            diffracted_power_dbm = (
+                tx_power_dbm +
+                tx_antenna_gain +
+                rx_antenna_gain -
+                path_loss_db -
+                diffraction_loss_db
+            )
+
+            # Only include significant diffractions
+            if diffracted_power_dbm > -95:
+                diffraction_powers.append(diffracted_power_dbm)
+
+        # Return best diffraction path (or combination of top few)
+        if not diffraction_powers:
+            return -100.0
+
+        # Sort and take best
+        diffraction_powers.sort(reverse=True)
+        return diffraction_powers[0]
+
+    def _is_wall_endpoint(
+        self,
+        x: float, y: float,
+        wall: WallSegment,
+        tolerance: float = 1.0
+    ) -> bool:
+        """Check if point is an endpoint of the wall segment."""
+        if (abs(x - wall.start.x) < tolerance and abs(y - wall.start.y) < tolerance):
+            return True
+        if (abs(x - wall.end.x) < tolerance and abs(y - wall.end.y) < tolerance):
+            return True
+        return False
+
+    def _point_to_line_distance(
+        self,
+        px: float, py: float,
+        x1: float, y1: float,
+        x2: float, y2: float
+    ) -> float:
+        """
+        Calculate perpendicular distance from point to infinite line through (x1,y1)-(x2,y2).
+        """
+        # Line direction
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx * dx + dy * dy)
+
+        if length < 1e-10:
+            return math.sqrt((px - x1)**2 + (py - y1)**2)
+
+        # Perpendicular distance using cross product
+        return abs((dy * (px - x1) - dx * (py - y1)) / length)
 
     def _power_sum_db(self, powers_dbm: List[float]) -> float:
         """

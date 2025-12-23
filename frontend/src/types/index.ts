@@ -48,6 +48,13 @@ export interface ForbiddenZone {
   reason?: string
 }
 
+export interface PriorityZone {
+  name: string
+  polygon: number[][]
+  priority: number  // 1.0 to 5.0 (1.0 = normal, 5.0 = highest)
+  min_signal_dbm?: number  // Optional zone-specific minimum signal
+}
+
 export interface MapDimensions {
   width: number
   height: number
@@ -58,6 +65,7 @@ export interface MapData {
   walls: WallSegment[]
   rooms: Room[]
   forbidden_zones: ForbiddenZone[]
+  priority_zones: PriorityZone[]
 }
 
 // Processing status types

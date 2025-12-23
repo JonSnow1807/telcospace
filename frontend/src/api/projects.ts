@@ -1,5 +1,5 @@
 import apiClient from './client'
-import type { Project, ProjectList, MapData, ProcessingStatus } from '@/types'
+import type { Project, ProjectList, MapData, ProcessingStatus, CompleteWallsPreview } from '@/types'
 
 // Allowed file extensions for upload
 export const ALLOWED_FILE_EXTENSIONS = [
@@ -122,6 +122,26 @@ export async function reprocessProject(
   return response.data
 }
 
+export async function completeWalls(
+  projectId: string,
+  maxGap: number = 100
+): Promise<Project> {
+  const response = await apiClient.post<Project>(
+    `/api/v1/projects/${projectId}/complete-walls?max_gap=${maxGap}`
+  )
+  return response.data
+}
+
+export async function previewCompleteWalls(
+  projectId: string,
+  maxGap: number = 100
+): Promise<CompleteWallsPreview> {
+  const response = await apiClient.post<CompleteWallsPreview>(
+    `/api/v1/projects/${projectId}/complete-walls-preview?max_gap=${maxGap}`
+  )
+  return response.data
+}
+
 // Bundled API object for convenience
 export const projectsApi = {
   fetchProjects,
@@ -133,4 +153,6 @@ export const projectsApi = {
   uploadProjectImage,
   fetchProcessingStatus,
   reprocessProject,
+  completeWalls,
+  previewCompleteWalls,
 }

@@ -69,6 +69,18 @@ export interface ProcessingStatus {
   error: string | null
 }
 
+// Complete walls preview types
+export interface CompleteWallsPreview {
+  original_walls: WallSegment[]
+  processed_walls: WallSegment[]
+  new_segments: WallSegment[]
+  stats: {
+    original_count: number
+    final_count: number
+    gaps_closed: number
+  }
+}
+
 // Project types
 export interface Project {
   id: string

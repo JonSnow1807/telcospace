@@ -337,6 +337,173 @@ async def reprocess_project(
     )
 
 
+@router.post("/{project_id}/complete-walls-preview")
+async def preview_complete_walls(
+    project_id: UUID,
+    max_gap: int = Query(100, ge=10, le=200, description="Maximum gap to auto-close (pixels)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Preview wall completion without saving changes.
+
+    Returns the original walls, processed walls, and new segments
+    so the frontend can show a preview before applying.
+    """
+    project = project_crud.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.map_data or not project.map_data.get('walls'):
+        raise HTTPException(
+            status_code=400,
+            detail="Project has no walls to complete"
+        )
+
+    from app.services.wall_post_processor import WallPostProcessor
+    from app.schemas.project import WallSegment, Point
+
+    # Get original walls
+    original_walls = project.map_data.get('walls', [])
+
+    # Convert dict walls to WallSegment objects
+    walls = []
+    for w in original_walls:
+        if isinstance(w, dict):
+            walls.append(WallSegment(
+                start=Point(x=w['start']['x'], y=w['start']['y']),
+                end=Point(x=w['end']['x'], y=w['end']['y']),
+                thickness=w.get('thickness', 0.15),
+                material=w.get('material', 'concrete'),
+                attenuation_db=w.get('attenuation_db', 15.0)
+            ))
+        else:
+            walls.append(w)
+
+    # Run post-processing
+    processor = WallPostProcessor(
+        gap_threshold=max_gap,
+        min_wall_length=30,
+        isolation_threshold=max_gap + 20
+    )
+    processed = processor.process(walls)
+
+    # Convert processed to dict format
+    processed_walls = [
+        {
+            'start': {'x': w.start.x, 'y': w.start.y},
+            'end': {'x': w.end.x, 'y': w.end.y},
+            'thickness': w.thickness,
+            'material': w.material,
+            'attenuation_db': w.attenuation_db
+        }
+        for w in processed
+    ]
+
+    # Find new/changed segments by comparing
+    def walls_match(w1, w2, tolerance=5):
+        """Check if two walls are approximately the same."""
+        return (
+            abs(w1['start']['x'] - w2['start']['x']) < tolerance and
+            abs(w1['start']['y'] - w2['start']['y']) < tolerance and
+            abs(w1['end']['x'] - w2['end']['x']) < tolerance and
+            abs(w1['end']['y'] - w2['end']['y']) < tolerance
+        )
+
+    # Find walls in processed that don't match any original
+    new_segments = []
+    for pw in processed_walls:
+        is_new = True
+        for ow in original_walls:
+            if walls_match(pw, ow):
+                is_new = False
+                break
+        if is_new:
+            new_segments.append(pw)
+
+    return {
+        "original_walls": original_walls,
+        "processed_walls": processed_walls,
+        "new_segments": new_segments,
+        "stats": {
+            "original_count": len(original_walls),
+            "final_count": len(processed_walls),
+            "gaps_closed": len(new_segments)
+        }
+    }
+
+
+@router.post("/{project_id}/complete-walls", response_model=Project)
+async def complete_walls(
+    project_id: UUID,
+    max_gap: int = Query(100, ge=10, le=200, description="Maximum gap to auto-close (pixels)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Auto-complete walls by closing detected gaps.
+
+    This runs the gap-closing algorithm on existing walls without
+    re-processing the floor plan image. Useful for:
+    - Closing small gaps between wall segments
+    - Connecting T-junctions where walls should meet
+    - Creating closed room polygons
+
+    - **max_gap**: Maximum gap size to bridge (10-200 pixels, default 100)
+    """
+    project = project_crud.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not project.map_data or not project.map_data.get('walls'):
+        raise HTTPException(
+            status_code=400,
+            detail="Project has no walls to complete"
+        )
+
+    from app.services.wall_post_processor import WallPostProcessor
+    from app.schemas.project import WallSegment, Point
+
+    # Convert dict walls to WallSegment objects
+    walls = []
+    for w in project.map_data.get('walls', []):
+        if isinstance(w, dict):
+            walls.append(WallSegment(
+                start=Point(x=w['start']['x'], y=w['start']['y']),
+                end=Point(x=w['end']['x'], y=w['end']['y']),
+                thickness=w.get('thickness', 0.15),
+                material=w.get('material', 'concrete'),
+                attenuation_db=w.get('attenuation_db', 15.0)
+            ))
+        else:
+            walls.append(w)
+
+    # Run post-processing with aggressive gap closure
+    processor = WallPostProcessor(
+        gap_threshold=max_gap,
+        min_wall_length=30,
+        isolation_threshold=max_gap + 20
+    )
+    processed = processor.process(walls)
+
+    # Convert back to dict format
+    processed_walls = [
+        {
+            'start': {'x': w.start.x, 'y': w.start.y},
+            'end': {'x': w.end.x, 'y': w.end.y},
+            'thickness': w.thickness,
+            'material': w.material,
+            'attenuation_db': w.attenuation_db
+        }
+        for w in processed
+    ]
+
+    # Update project map data
+    new_map_data = {**project.map_data, 'walls': processed_walls}
+    from app.schemas.project import MapData
+    updated_project = project_crud.update_project_map(db, project_id, MapData(**new_map_data))
+
+    return updated_project
+
+
 @router.post("/{project_id}/image", response_model=Project)
 async def upload_project_image(
     project_id: UUID,

@@ -65,6 +65,11 @@ class GeneticOptimizer:
         self.crossover_rate = crossover_rate
         self.elite_size = elite_size
 
+        # Adaptive mutation parameters
+        self.initial_mutation_rate = mutation_rate
+        self.min_mutation_rate = 0.02
+        self.mutation_decay = 0.95
+
         self.rf_engine = get_rf_engine()
 
         # Map dimensions
@@ -114,6 +119,12 @@ class GeneticOptimizer:
             if progress_callback:
                 progress_callback(generation, self.generations, best.fitness)
 
+            # Calculate adaptive mutation rate (decreases over generations)
+            adaptive_mutation = max(
+                self.min_mutation_rate,
+                self.initial_mutation_rate * (self.mutation_decay ** generation)
+            )
+
             # Selection
             parents = self._selection(population)
 
@@ -126,9 +137,9 @@ class GeneticOptimizer:
                 else:
                     offspring.extend([parents[i].copy(), parents[i + 1].copy()])
 
-            # Mutation
+            # Mutation with adaptive rate
             for individual in offspring:
-                if random.random() < self.mutation_rate:
+                if random.random() < adaptive_mutation:
                     self._mutate(individual)
 
             # Evaluate offspring
@@ -149,44 +160,237 @@ class GeneticOptimizer:
         return self._get_diverse_solutions(population, count=5)
 
     def _initialize_population(self) -> List[Individual]:
-        """Create initial random population."""
+        """
+        Create initial population with intelligent seeding strategies.
+
+        Uses a mix of:
+        - 25% corner-based (strategic corner coverage)
+        - 25% grid-based (even distribution)
+        - 20% centroid-based (room centers if available)
+        - 30% random (for diversity)
+        """
         population = []
 
-        for _ in range(self.population_size):
-            # Determine number of routers
-            max_routers = self.constraints.max_routers or 10
-            min_routers = 1
-            num_routers = random.randint(min_routers, max_routers)
+        # Calculate counts for each strategy
+        corner_count = self.population_size // 4
+        grid_count = self.population_size // 4
+        centroid_count = self.population_size // 5
+        random_count = self.population_size - corner_count - grid_count - centroid_count
 
-            # Random positions in valid area
-            positions = []
-            for _ in range(num_routers):
-                pos = self._random_valid_position()
-                positions.append(pos)
-
-            # Random router selection (respecting allowed_router_ids)
-            available = self.available_routers
-            if self.constraints.allowed_router_ids:
-                available = [
-                    r for r in available
-                    if r.id in self.constraints.allowed_router_ids
-                ]
-
-            if not available:
-                available = self.available_routers
-
-            router_ids = [
-                random.choice(available).id
-                for _ in range(num_routers)
+        # Get available routers
+        available = self.available_routers
+        if self.constraints.allowed_router_ids:
+            available = [
+                r for r in available
+                if r.id in self.constraints.allowed_router_ids
             ]
+        if not available:
+            available = self.available_routers
 
-            individual = Individual(
-                router_positions=positions,
-                router_ids=router_ids
-            )
-            population.append(individual)
+        max_routers = self.constraints.max_routers or 10
+
+        # Strategy 1: Corner-based placements (good for room coverage)
+        population.extend(self._create_corner_individuals(corner_count, available, max_routers))
+
+        # Strategy 2: Grid-based placements (even distribution)
+        population.extend(self._create_grid_individuals(grid_count, available, max_routers))
+
+        # Strategy 3: Centroid-based placements (room centers)
+        population.extend(self._create_centroid_individuals(centroid_count, available, max_routers))
+
+        # Strategy 4: Random placements (diversity)
+        population.extend(self._create_random_individuals(random_count, available, max_routers))
 
         return population
+
+    def _create_corner_individuals(
+        self,
+        count: int,
+        available_routers: List[RouterSchema],
+        max_routers: int
+    ) -> List[Individual]:
+        """Create individuals with routers near room corners for maximum coverage."""
+        individuals = []
+
+        # Find valid corner positions from walls
+        corners = self._find_valid_corners()
+
+        for _ in range(count):
+            num_routers = random.randint(1, max_routers)
+
+            if corners:
+                # Select subset of corners, with some randomization
+                selected_corners = random.sample(corners, min(num_routers, len(corners)))
+                positions = [(c[0], c[1]) for c in selected_corners]
+
+                # If we need more positions, add random valid ones
+                while len(positions) < num_routers:
+                    positions.append(self._random_valid_position())
+            else:
+                positions = [self._random_valid_position() for _ in range(num_routers)]
+
+            router_ids = [random.choice(available_routers).id for _ in range(len(positions))]
+            individuals.append(Individual(router_positions=positions, router_ids=router_ids))
+
+        return individuals
+
+    def _create_grid_individuals(
+        self,
+        count: int,
+        available_routers: List[RouterSchema],
+        max_routers: int
+    ) -> List[Individual]:
+        """Create individuals with evenly distributed grid placements."""
+        individuals = []
+
+        for _ in range(count):
+            num_routers = random.randint(1, max_routers)
+
+            # Calculate grid dimensions for this number of routers
+            grid_cols = int(np.ceil(np.sqrt(num_routers)))
+            grid_rows = int(np.ceil(num_routers / grid_cols))
+
+            margin = 50
+            cell_width = (self.width - 2 * margin) / max(grid_cols, 1)
+            cell_height = (self.height - 2 * margin) / max(grid_rows, 1)
+
+            positions = []
+            for i in range(num_routers):
+                row = i // grid_cols
+                col = i % grid_cols
+
+                # Center of each grid cell with small random offset
+                x = margin + (col + 0.5) * cell_width + random.uniform(-20, 20)
+                y = margin + (row + 0.5) * cell_height + random.uniform(-20, 20)
+
+                # Clamp to valid range
+                x = max(margin, min(self.width - margin, x))
+                y = max(margin, min(self.height - margin, y))
+
+                # Check if valid, otherwise get random valid position
+                ix, iy = int(x), int(y)
+                if 0 <= ix < self.width and 0 <= iy < self.height and self.valid_mask[iy, ix]:
+                    positions.append((x, y))
+                else:
+                    positions.append(self._random_valid_position())
+
+            router_ids = [random.choice(available_routers).id for _ in range(len(positions))]
+            individuals.append(Individual(router_positions=positions, router_ids=router_ids))
+
+        return individuals
+
+    def _create_centroid_individuals(
+        self,
+        count: int,
+        available_routers: List[RouterSchema],
+        max_routers: int
+    ) -> List[Individual]:
+        """Create individuals with routers at room centroids (if rooms detected)."""
+        individuals = []
+
+        # Calculate room centroids
+        centroids = []
+        if self.map_data.rooms:
+            for room in self.map_data.rooms:
+                if room.polygon and len(room.polygon) >= 3:
+                    cx = sum(p[0] for p in room.polygon) / len(room.polygon)
+                    cy = sum(p[1] for p in room.polygon) / len(room.polygon)
+
+                    # Check if centroid is valid
+                    ix, iy = int(cx), int(cy)
+                    if 0 <= ix < self.width and 0 <= iy < self.height and self.valid_mask[iy, ix]:
+                        centroids.append((cx, cy))
+
+        for _ in range(count):
+            num_routers = random.randint(1, max_routers)
+
+            if centroids:
+                # Select subset of centroids
+                selected = random.sample(centroids, min(num_routers, len(centroids)))
+                positions = list(selected)
+
+                # If we need more, add random valid positions
+                while len(positions) < num_routers:
+                    positions.append(self._random_valid_position())
+            else:
+                # No rooms detected, fall back to random
+                positions = [self._random_valid_position() for _ in range(num_routers)]
+
+            router_ids = [random.choice(available_routers).id for _ in range(len(positions))]
+            individuals.append(Individual(router_positions=positions, router_ids=router_ids))
+
+        return individuals
+
+    def _create_random_individuals(
+        self,
+        count: int,
+        available_routers: List[RouterSchema],
+        max_routers: int
+    ) -> List[Individual]:
+        """Create purely random individuals for diversity."""
+        individuals = []
+
+        for _ in range(count):
+            num_routers = random.randint(1, max_routers)
+            positions = [self._random_valid_position() for _ in range(num_routers)]
+            router_ids = [random.choice(available_routers).id for _ in range(num_routers)]
+            individuals.append(Individual(router_positions=positions, router_ids=router_ids))
+
+        return individuals
+
+    def _find_valid_corners(self) -> List[Tuple[float, float]]:
+        """Find valid corner positions from wall intersections."""
+        corners = []
+
+        if not self.map_data.walls:
+            return corners
+
+        # Find wall endpoint clusters (potential corners)
+        endpoints = []
+        for wall in self.map_data.walls:
+            endpoints.append((wall.start.x, wall.start.y))
+            endpoints.append((wall.end.x, wall.end.y))
+
+        if not endpoints:
+            return corners
+
+        # Cluster nearby endpoints (within 30 pixels)
+        clustered = []
+        used = set()
+
+        for i, ep1 in enumerate(endpoints):
+            if i in used:
+                continue
+
+            cluster = [ep1]
+            used.add(i)
+
+            for j, ep2 in enumerate(endpoints):
+                if j in used:
+                    continue
+                dist = np.sqrt((ep1[0] - ep2[0])**2 + (ep1[1] - ep2[1])**2)
+                if dist < 30:
+                    cluster.append(ep2)
+                    used.add(j)
+
+            # Average cluster position
+            cx = sum(p[0] for p in cluster) / len(cluster)
+            cy = sum(p[1] for p in cluster) / len(cluster)
+            clustered.append((cx, cy))
+
+        # Filter to valid positions (offset from actual corners)
+        for cx, cy in clustered:
+            # Try positions near the corner but inside the room
+            offsets = [(40, 40), (40, -40), (-40, 40), (-40, -40)]
+            for dx, dy in offsets:
+                x, y = cx + dx, cy + dy
+                ix, iy = int(x), int(y)
+                if 0 <= ix < self.width and 0 <= iy < self.height:
+                    if self.valid_mask[iy, ix]:
+                        corners.append((x, y))
+                        break
+
+        return corners
 
     def _evaluate_fitness(self, individual: Individual) -> float:
         """
@@ -367,20 +571,31 @@ class GeneticOptimizer:
         mutation_type = random.choice(['move', 'change_type', 'add_remove'])
 
         if mutation_type == 'move':
-            # Move random router to nearby position
+            # Move random router to nearby valid position
             idx = random.randint(0, len(individual.router_positions) - 1)
             old_x, old_y = individual.router_positions[idx]
 
-            # Move within a radius
+            # Try to move within a radius, checking for valid positions
             radius = min(self.width, self.height) * 0.2
-            new_x = old_x + random.uniform(-radius, radius)
-            new_y = old_y + random.uniform(-radius, radius)
 
-            # Clamp to bounds
-            new_x = max(10, min(self.width - 10, new_x))
-            new_y = max(10, min(self.height - 10, new_y))
+            # Try multiple times to find valid position
+            for _ in range(20):
+                new_x = old_x + random.uniform(-radius, radius)
+                new_y = old_y + random.uniform(-radius, radius)
 
-            individual.router_positions[idx] = (new_x, new_y)
+                # Clamp to bounds
+                new_x = max(10, min(self.width - 10, new_x))
+                new_y = max(10, min(self.height - 10, new_y))
+
+                # Check if position is valid
+                ix, iy = int(new_x), int(new_y)
+                if 0 <= ix < self.width and 0 <= iy < self.height:
+                    if self.valid_mask[iy, ix]:
+                        individual.router_positions[idx] = (new_x, new_y)
+                        break
+            else:
+                # Couldn't find valid nearby position, get random valid one
+                individual.router_positions[idx] = self._random_valid_position()
 
         elif mutation_type == 'change_type':
             # Change random router type
@@ -496,52 +711,52 @@ class GeneticOptimizer:
                     pts = np.array(room.polygon, dtype=np.int32)
                     cv2.fillPoly(mask_uint8, [pts], 1)
             mask = mask_uint8.astype(bool)
+        elif self.map_data.walls:
+            # Create boundary polygon from wall endpoints using convex hull
+            # This ensures routers are placed inside the floor plan boundary
+            all_points = []
+            for wall in self.map_data.walls:
+                all_points.append([int(wall.start.x), int(wall.start.y)])
+                all_points.append([int(wall.end.x), int(wall.end.y)])
+
+            if len(all_points) >= 3:
+                points_array = np.array(all_points, dtype=np.int32)
+
+                # Use convex hull to get outer boundary
+                hull = cv2.convexHull(points_array)
+
+                # Fill the hull as valid area
+                mask_uint8 = np.zeros((self.height, self.width), dtype=np.uint8)
+                cv2.fillPoly(mask_uint8, [hull], 1)
+                mask = mask_uint8.astype(bool)
+
+                # Shrink the valid area by a margin to keep routers away from walls
+                kernel = np.ones((60, 60), np.uint8)
+                mask_uint8 = mask.astype(np.uint8)
+                mask_uint8 = cv2.erode(mask_uint8, kernel, iterations=1)
+                mask = mask_uint8.astype(bool)
         else:
-            # Fallback: use bounding box of all walls with padding
-            if self.map_data.walls:
-                all_x = []
-                all_y = []
-                for wall in self.map_data.walls:
-                    all_x.extend([wall.start.x, wall.end.x])
-                    all_y.extend([wall.start.y, wall.end.y])
-
-                min_x = max(0, int(min(all_x)) + 50)
-                max_x = min(self.width, int(max(all_x)) - 50)
-                min_y = max(0, int(min(all_y)) + 50)
-                max_y = min(self.height, int(max(all_y)) - 50)
-
-                mask[min_y:max_y, min_x:max_x] = True
-            else:
-                # No walls detected, use center region
-                margin = int(min(self.width, self.height) * 0.2)
-                mask[margin:self.height-margin, margin:self.width-margin] = True
+            # No walls detected, use center region
+            margin = int(min(self.width, self.height) * 0.2)
+            mask[margin:self.height-margin, margin:self.width-margin] = True
 
         # Mark walls as invalid (with buffer)
         for wall in self.map_data.walls:
             x1, y1 = int(wall.start.x), int(wall.start.y)
             x2, y2 = int(wall.end.x), int(wall.end.y)
 
-            # Create line with buffer
-            # Simple approach: mark rectangle around wall
-            buffer = 20  # pixels
-            min_x = max(0, min(x1, x2) - buffer)
-            max_x = min(self.width, max(x1, x2) + buffer)
-            min_y = max(0, min(y1, y2) - buffer)
-            max_y = min(self.height, max(y1, y2) + buffer)
-
-            mask[min_y:max_y, min_x:max_x] = False
+            # Draw thick line as invalid area (wall buffer)
+            mask_uint8 = mask.astype(np.uint8)
+            cv2.line(mask_uint8, (x1, y1), (x2, y2), 0, thickness=40)
+            mask = mask_uint8.astype(bool)
 
         # Mark forbidden zones as invalid
         for zone in self.map_data.forbidden_zones:
-            # Simple bounding box approach
-            if zone.polygon:
-                xs = [p[0] for p in zone.polygon]
-                ys = [p[1] for p in zone.polygon]
-                min_x = max(0, int(min(xs)))
-                max_x = min(self.width, int(max(xs)))
-                min_y = max(0, int(min(ys)))
-                max_y = min(self.height, int(max(ys)))
-                mask[min_y:max_y, min_x:max_x] = False
+            if zone.polygon and len(zone.polygon) >= 3:
+                pts = np.array([[int(p[0]), int(p[1])] for p in zone.polygon], dtype=np.int32)
+                mask_uint8 = mask.astype(np.uint8)
+                cv2.fillPoly(mask_uint8, [pts], 0)
+                mask = mask_uint8.astype(bool)
 
         return mask
 

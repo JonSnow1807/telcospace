@@ -12,14 +12,19 @@ import {
   Minimize2,
   ZoomIn,
   ZoomOut,
-  BoxSelect
+  BoxSelect,
+  Undo2,
+  Redo2,
+  Keyboard,
+  X,
+  Wand2
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { useProjectStore } from '@/store/projectStore'
 import { projectsApi } from '@/api/projects'
-import type { WallSegment, Point } from '@/types'
+import type { WallSegment, Point, CompleteWallsPreview } from '@/types'
 import { WALL_MATERIALS } from '@/types'
 
 interface FloorPlanEditorProps {
@@ -76,11 +81,21 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
   const containerRef = useRef<HTMLDivElement>(null)
   const [image] = useImage(imageUrl || '')
   const [saving, setSaving] = useState(false)
+  const [completingWalls, setCompletingWalls] = useState(false)
   const [showImage, setShowImage] = useState(true)
+
+  // Complete walls modal state
+  const [showCompleteModal, setShowCompleteModal] = useState(false)
+  const [sensitivity, setSensitivity] = useState(100)
+  const [previewData, setPreviewData] = useState<CompleteWallsPreview | null>(null)
+  const [loadingPreview, setLoadingPreview] = useState(false)
+  const previewTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const [showRooms] = useState(true)
   const [roomNameInput, setRoomNameInput] = useState('')
   const [zoom, setZoom] = useState(1)
   const [showPropertiesPanel, setShowPropertiesPanel] = useState(true)
+  const [showKeyboardShortcuts, setShowKeyboardShortcuts] = useState(false)
+  const [dismissedOnboarding, setDismissedOnboarding] = useState(false)
 
   // Selection box state
   const [selectionBox, setSelectionBox] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null)
@@ -109,6 +124,11 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
     deleteRoom,
     hasUnsavedChanges,
     setHasUnsavedChanges,
+    canUndo,
+    canRedo,
+    undo,
+    redo,
+    pushToHistory,
   } = useProjectStore()
 
   // Drawing state
@@ -116,6 +136,14 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
   const [currentLine, setCurrentLine] = useState<Point & { endX?: number; endY?: number } | null>(null)
   const [hoveredWallIndex, setHoveredWallIndex] = useState<number | null>(null)
   const [draggingEndpoint, setDraggingEndpoint] = useState<{ wallIndex: number; endpoint: 'start' | 'end' } | null>(null)
+
+  // Extend from endpoint state
+  const [extendingFrom, setExtendingFrom] = useState<{ wallIndex: number; endpoint: 'start' | 'end'; x: number; y: number } | null>(null)
+
+  // Dragging wall state
+  const [isDraggingWall, setIsDraggingWall] = useState(false)
+  const [dragWallIndex, setDragWallIndex] = useState<number | null>(null)
+  const [dragStartPos, setDragStartPos] = useState<{ x: number; y: number } | null>(null)
 
   // Selected wall material for new walls
   const [selectedMaterial, setSelectedMaterial] = useState('drywall')
@@ -153,6 +181,22 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
       const x = point.x / zoom
       const y = point.y / zoom
 
+      // If extending from endpoint, clicking places the new wall
+      if (extendingFrom) {
+        const material = WALL_MATERIALS.find((m) => m.value === selectedMaterial)
+        const newWall: WallSegment = {
+          start: { x: extendingFrom.x, y: extendingFrom.y },
+          end: { x, y },
+          thickness: 0.15,
+          material: selectedMaterial,
+          attenuation_db: material?.attenuation || 3,
+        }
+        addWall(newWall)
+        setExtendingFrom(null)
+        setCurrentLine(null)
+        return
+      }
+
       if (drawingMode === 'wall') {
         if (e.target !== stage) return
         setIsDrawing(true)
@@ -162,19 +206,41 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
         if (selectedWallIndices.length > 0 && e.target !== stage) {
           const clickedWallIndex = mapData?.walls.findIndex((wall, idx) => {
             if (!selectedWallIndices.includes(idx)) return false
-            // Check if click is near the wall
             const dist = pointToLineDistance(x, y, wall.start.x, wall.start.y, wall.end.x, wall.end.y)
             return dist < 15
           })
 
           if (clickedWallIndex !== undefined && clickedWallIndex >= 0) {
+            pushToHistory()
             setIsMovingSelection(true)
             setMoveStartPos({ x, y })
             return
           }
         }
 
-        // Start box selection
+        // Check if clicking on any wall (to select and start dragging)
+        if (e.target !== stage && mapData) {
+          const clickedIdx = mapData.walls.findIndex((wall) => {
+            const dist = pointToLineDistance(x, y, wall.start.x, wall.start.y, wall.end.x, wall.end.y)
+            return dist < 15
+          })
+
+          if (clickedIdx >= 0) {
+            // Select this wall and start dragging immediately
+            if (!e.evt.shiftKey) {
+              setSelectedWallIndices([clickedIdx])
+            } else if (!selectedWallIndices.includes(clickedIdx)) {
+              addToWallSelection(clickedIdx)
+            }
+            pushToHistory()
+            setIsDraggingWall(true)
+            setDragWallIndex(clickedIdx)
+            setDragStartPos({ x, y })
+            return
+          }
+        }
+
+        // Start box selection on empty area
         if (e.target === stage) {
           setIsBoxSelecting(true)
           setSelectionBox({ startX: x, startY: y, endX: x, endY: y })
@@ -192,7 +258,7 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
         }
       }
     },
-    [drawingMode, zoom, selectedWallIndices, mapData, clearWallSelection]
+    [drawingMode, zoom, selectedWallIndices, mapData, clearWallSelection, pushToHistory, extendingFrom, selectedMaterial, addWall, setSelectedWallIndices, addToWallSelection]
   )
 
   // Point to line distance
@@ -222,8 +288,42 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
       const x = point.x / zoom
       const y = point.y / zoom
 
+      // Extending from endpoint - show preview line
+      if (extendingFrom) {
+        setCurrentLine({
+          x: extendingFrom.x,
+          y: extendingFrom.y,
+          endX: x,
+          endY: y,
+        })
+        return
+      }
+
       if (isDrawing && drawingMode === 'wall') {
         setCurrentLine((prev) => prev ? { ...prev, endX: x, endY: y } : null)
+      } else if (isDraggingWall && dragStartPos && dragWallIndex !== null && mapData) {
+        // Drag single wall (or all selected if this wall is selected)
+        const dx = x - dragStartPos.x
+        const dy = y - dragStartPos.y
+
+        const indicesToMove = selectedWallIndices.includes(dragWallIndex)
+          ? selectedWallIndices
+          : [dragWallIndex]
+
+        const updates = indicesToMove.map(idx => {
+          const wall = mapData.walls[idx]
+          return {
+            index: idx,
+            wall: {
+              ...wall,
+              start: { x: wall.start.x + dx, y: wall.start.y + dy },
+              end: { x: wall.end.x + dx, y: wall.end.y + dy },
+            }
+          }
+        })
+
+        updateWalls(updates)
+        setDragStartPos({ x, y })
       } else if (isBoxSelecting && selectionBox) {
         setSelectionBox({ ...selectionBox, endX: x, endY: y })
       } else if (isMovingSelection && moveStartPos && mapData) {
@@ -247,7 +347,7 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
         setMoveStartPos({ x, y })
       }
     },
-    [isDrawing, drawingMode, zoom, isBoxSelecting, selectionBox, isMovingSelection, moveStartPos, selectedWallIndices, mapData, updateWalls]
+    [isDrawing, drawingMode, zoom, isBoxSelecting, selectionBox, isMovingSelection, moveStartPos, selectedWallIndices, mapData, updateWalls, extendingFrom, isDraggingWall, dragStartPos, dragWallIndex]
   )
 
   // Handle mouse up
@@ -308,12 +408,16 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
 
         setIsBoxSelecting(false)
         setSelectionBox(null)
+      } else if (isDraggingWall) {
+        setIsDraggingWall(false)
+        setDragWallIndex(null)
+        setDragStartPos(null)
       } else if (isMovingSelection) {
         setIsMovingSelection(false)
         setMoveStartPos(null)
       }
     },
-    [isDrawing, drawingMode, currentLine, selectedMaterial, addWall, zoom, isBoxSelecting, selectionBox, mapData, selectedWallIndices, setSelectedWallIndices, isMovingSelection]
+    [isDrawing, drawingMode, currentLine, selectedMaterial, addWall, zoom, isBoxSelecting, selectionBox, mapData, selectedWallIndices, setSelectedWallIndices, isMovingSelection, isDraggingWall]
   )
 
   // Handle wall click
@@ -441,6 +545,74 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
     }
   }, [projectId, mapData, setHasUnsavedChanges, onSave])
 
+  // Complete walls - auto-close gaps
+  const handleCompleteWalls = useCallback(async () => {
+    if (!projectId || !mapData?.walls.length) return
+
+    setCompletingWalls(true)
+    try {
+      pushToHistory() // Allow undo
+      const result = await projectsApi.completeWalls(projectId, sensitivity)
+      if (result.map_data) {
+        // Update local state with the completed walls
+        useProjectStore.getState().setMapData(result.map_data)
+      }
+      setShowCompleteModal(false)
+      setPreviewData(null)
+    } catch (error) {
+      console.error('Failed to complete walls:', error)
+      alert('Failed to auto-complete walls')
+    } finally {
+      setCompletingWalls(false)
+    }
+  }, [projectId, mapData, pushToHistory, sensitivity])
+
+  // Fetch preview for complete walls
+  const fetchPreview = useCallback(async (maxGap: number) => {
+    if (!projectId) return
+
+    setLoadingPreview(true)
+    try {
+      const preview = await projectsApi.previewCompleteWalls(projectId, maxGap)
+      setPreviewData(preview)
+    } catch (error) {
+      console.error('Failed to fetch preview:', error)
+    } finally {
+      setLoadingPreview(false)
+    }
+  }, [projectId])
+
+  // Debounced preview fetch when sensitivity changes
+  const handleSensitivityChange = useCallback((value: number) => {
+    setSensitivity(value)
+
+    // Clear previous timeout
+    if (previewTimeoutRef.current) {
+      clearTimeout(previewTimeoutRef.current)
+    }
+
+    // Debounce the preview fetch
+    previewTimeoutRef.current = setTimeout(() => {
+      fetchPreview(value)
+    }, 300)
+  }, [fetchPreview])
+
+  // Open complete walls modal
+  const openCompleteModal = useCallback(() => {
+    setShowCompleteModal(true)
+    setSensitivity(100)
+    fetchPreview(100)
+  }, [fetchPreview])
+
+  // Close modal and cleanup
+  const closeCompleteModal = useCallback(() => {
+    setShowCompleteModal(false)
+    setPreviewData(null)
+    if (previewTimeoutRef.current) {
+      clearTimeout(previewTimeoutRef.current)
+    }
+  }, [])
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -449,12 +621,23 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
           handleDeleteSelected()
         }
       } else if (e.key === 'Escape') {
-        clearWallSelection()
-        setSelectedRoomIndex(null)
-        setIsDrawing(false)
-        setCurrentLine(null)
-        setIsBoxSelecting(false)
-        setSelectionBox(null)
+        if (showKeyboardShortcuts) {
+          setShowKeyboardShortcuts(false)
+        } else if (extendingFrom) {
+          // Cancel extending
+          setExtendingFrom(null)
+          setCurrentLine(null)
+        } else {
+          clearWallSelection()
+          setSelectedRoomIndex(null)
+          setIsDrawing(false)
+          setCurrentLine(null)
+          setIsBoxSelecting(false)
+          setSelectionBox(null)
+        }
+      } else if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+        e.preventDefault()
+        setShowKeyboardShortcuts(!showKeyboardShortcuts)
       } else if (e.key === 's' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
         handleSave()
@@ -464,15 +647,30 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
         if (mapData) {
           setSelectedWallIndices(mapData.walls.map((_, i) => i))
         }
+      } else if (e.key === 'z' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        if (e.shiftKey) {
+          // Redo: Ctrl+Shift+Z or Cmd+Shift+Z
+          if (canRedo()) redo()
+        } else {
+          // Undo: Ctrl+Z or Cmd+Z
+          if (canUndo()) undo()
+        }
+      } else if (e.key === 'y' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        // Redo: Ctrl+Y or Cmd+Y (alternative)
+        if (canRedo()) redo()
       }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [handleDeleteSelected, clearWallSelection, setSelectedRoomIndex, handleSave, mapData, setSelectedWallIndices])
+  }, [handleDeleteSelected, clearWallSelection, setSelectedRoomIndex, handleSave, mapData, setSelectedWallIndices, canUndo, canRedo, undo, redo, showKeyboardShortcuts, extendingFrom])
 
   // Get cursor style
   const getCursor = () => {
+    if (extendingFrom) return 'crosshair'
+    if (isDraggingWall) return 'grabbing'
     if (isMovingSelection) return 'grabbing'
     if (draggingEndpoint) return 'grabbing'
     if (isBoxSelecting) return 'crosshair'
@@ -482,7 +680,7 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
       case 'boxSelect':
         return 'crosshair'
       case 'select':
-        return selectedWallIndices.length > 0 ? 'move' : 'default'
+        return hoveredWallIndex !== null ? 'grab' : 'default'
       default:
         return 'default'
     }
@@ -504,6 +702,32 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
     <div className="flex flex-col h-full">
       {/* Toolbar */}
       <div className="flex items-center gap-2 p-2 bg-gray-50 border-b flex-wrap">
+        {/* Undo/Redo buttons */}
+        <div className="flex gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={undo}
+            disabled={!canUndo()}
+            className="h-8 w-8 p-0"
+            title="Undo (Ctrl+Z)"
+          >
+            <Undo2 className="w-4 h-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={redo}
+            disabled={!canRedo()}
+            className="h-8 w-8 p-0"
+            title="Redo (Ctrl+Shift+Z)"
+          >
+            <Redo2 className="w-4 h-4" />
+          </Button>
+        </div>
+
+        <div className="w-px h-6 bg-gray-300" />
+
         {/* Mode buttons */}
         <div className="flex gap-1">
           <Button
@@ -530,6 +754,7 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
             size="sm"
             onClick={() => setDrawingMode('wall')}
             className="h-8"
+            title="Draw Wall (click and drag)"
           >
             <Pencil className="w-4 h-4 mr-1" />
             Draw
@@ -543,6 +768,7 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
           value={selectedMaterial}
           onChange={(e) => setSelectedMaterial(e.target.value)}
           className="text-sm border rounded px-2 py-1 h-8 bg-white"
+          title="Wall Material for new walls"
         >
           {WALL_MATERIALS.map((m) => (
             <option key={m.value} value={m.value}>
@@ -566,11 +792,11 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
 
         {/* Zoom controls */}
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={handleZoomOut} className="h-8 w-8 p-0">
+          <Button variant="ghost" size="sm" onClick={handleZoomOut} className="h-8 w-8 p-0" title="Zoom Out">
             <ZoomOut className="w-4 h-4" />
           </Button>
-          <span className="text-xs w-12 text-center">{Math.round(zoom * 100)}%</span>
-          <Button variant="ghost" size="sm" onClick={handleZoomIn} className="h-8 w-8 p-0">
+          <span className="text-xs w-12 text-center" title="Current Zoom Level">{Math.round(zoom * 100)}%</span>
+          <Button variant="ghost" size="sm" onClick={handleZoomIn} className="h-8 w-8 p-0" title="Zoom In">
             <ZoomIn className="w-4 h-4" />
           </Button>
         </div>
@@ -586,11 +812,22 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
 
         {/* Delete button */}
         {(selectedWallIndices.length > 0 || selectedRoomIndex !== null) && (
-          <Button variant="destructive" size="sm" onClick={handleDeleteSelected} className="h-8">
+          <Button variant="destructive" size="sm" onClick={handleDeleteSelected} className="h-8" title="Delete Selected (Delete key)">
             <Trash2 className="w-4 h-4 mr-1" />
             Delete{selectedWallIndices.length > 1 ? ` (${selectedWallIndices.length})` : ''}
           </Button>
         )}
+
+        {/* Keyboard shortcuts help */}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setShowKeyboardShortcuts(true)}
+          className="h-8 w-8 p-0"
+          title="Keyboard Shortcuts (?)"
+        >
+          <Keyboard className="w-4 h-4" />
+        </Button>
 
         {/* Properties toggle */}
         <Button
@@ -598,6 +835,7 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
           size="sm"
           onClick={() => setShowPropertiesPanel(!showPropertiesPanel)}
           className="h-8"
+          title="Toggle Properties Panel"
         >
           {showPropertiesPanel ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
         </Button>
@@ -608,9 +846,23 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
           onClick={handleSave}
           disabled={saving || !hasUnsavedChanges}
           className="h-8"
+          title="Save Changes (Ctrl+S)"
         >
           <Save className="w-4 h-4 mr-1" />
           {saving ? 'Saving...' : 'Save'}
+        </Button>
+
+        {/* Complete Walls button */}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={openCompleteModal}
+          disabled={!mapData?.walls.length}
+          className="h-8"
+          title="Auto-complete wall gaps to close rooms"
+        >
+          <Wand2 className="w-4 h-4 mr-1" />
+          Complete Walls
         </Button>
       </div>
 
@@ -701,6 +953,25 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
                 {/* Drag handles for single selected wall */}
                 {selectedWallIndices.length === 1 && mapData?.walls[selectedWallIndices[0]] && (
                   <>
+                    {/* Start endpoint - outer ring for extend indicator */}
+                    <Circle
+                      x={mapData.walls[selectedWallIndices[0]].start.x}
+                      y={mapData.walls[selectedWallIndices[0]].start.y}
+                      radius={12}
+                      fill="transparent"
+                      stroke="#22c55e"
+                      strokeWidth={2}
+                      opacity={0.6}
+                      onDblClick={() => {
+                        const wall = mapData.walls[selectedWallIndices[0]]
+                        setExtendingFrom({
+                          wallIndex: selectedWallIndices[0],
+                          endpoint: 'start',
+                          x: wall.start.x,
+                          y: wall.start.y,
+                        })
+                      }}
+                    />
                     <Circle
                       x={mapData.walls[selectedWallIndices[0]].start.x}
                       y={mapData.walls[selectedWallIndices[0]].start.y}
@@ -710,8 +981,30 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
                       strokeWidth={2}
                       draggable
                       onDragMove={(e) => handleEndpointDragMove(e, selectedWallIndices[0], 'start')}
-                      onDragStart={() => setDraggingEndpoint({ wallIndex: selectedWallIndices[0], endpoint: 'start' })}
+                      onDragStart={() => {
+                        pushToHistory()
+                        setDraggingEndpoint({ wallIndex: selectedWallIndices[0], endpoint: 'start' })
+                      }}
                       onDragEnd={() => setDraggingEndpoint(null)}
+                    />
+                    {/* End endpoint - outer ring for extend indicator */}
+                    <Circle
+                      x={mapData.walls[selectedWallIndices[0]].end.x}
+                      y={mapData.walls[selectedWallIndices[0]].end.y}
+                      radius={12}
+                      fill="transparent"
+                      stroke="#22c55e"
+                      strokeWidth={2}
+                      opacity={0.6}
+                      onDblClick={() => {
+                        const wall = mapData.walls[selectedWallIndices[0]]
+                        setExtendingFrom({
+                          wallIndex: selectedWallIndices[0],
+                          endpoint: 'end',
+                          x: wall.end.x,
+                          y: wall.end.y,
+                        })
+                      }}
                     />
                     <Circle
                       x={mapData.walls[selectedWallIndices[0]].end.x}
@@ -722,14 +1015,17 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
                       strokeWidth={2}
                       draggable
                       onDragMove={(e) => handleEndpointDragMove(e, selectedWallIndices[0], 'end')}
-                      onDragStart={() => setDraggingEndpoint({ wallIndex: selectedWallIndices[0], endpoint: 'end' })}
+                      onDragStart={() => {
+                        pushToHistory()
+                        setDraggingEndpoint({ wallIndex: selectedWallIndices[0], endpoint: 'end' })
+                      }}
                       onDragEnd={() => setDraggingEndpoint(null)}
                     />
                   </>
                 )}
 
-                {/* Current drawing line */}
-                {isDrawing && currentLine && (
+                {/* Current drawing line or extend preview */}
+                {(isDrawing || extendingFrom) && currentLine && (
                   <Line
                     points={[
                       currentLine.x,
@@ -737,7 +1033,7 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
                       currentLine.endX || currentLine.x,
                       currentLine.endY || currentLine.y,
                     ]}
-                    stroke="#3b82f6"
+                    stroke={extendingFrom ? '#22c55e' : '#3b82f6'}
                     strokeWidth={4}
                     lineCap="round"
                     dash={[8, 4]}
@@ -757,6 +1053,19 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
                     dash={[4, 4]}
                   />
                 )}
+
+                {/* Preview: New segments in green when modal is open */}
+                {showCompleteModal && previewData?.new_segments.map((wall, index) => (
+                  <Line
+                    key={`preview-${index}`}
+                    points={[wall.start.x, wall.start.y, wall.end.x, wall.end.y]}
+                    stroke="#22c55e"
+                    strokeWidth={4}
+                    opacity={0.8}
+                    dash={[10, 5]}
+                    lineCap="round"
+                  />
+                ))}
               </Layer>
             </Stage>
           </div>
@@ -893,6 +1202,8 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
                     <p>• <strong>Drag</strong> on empty area to box select</p>
                     <p>• <strong>Ctrl+A</strong> to select all</p>
                     <p>• <strong>Delete</strong> to remove</p>
+                    <p>• <strong>Ctrl+Z</strong> to undo</p>
+                    <p>• <strong>Ctrl+Shift+Z</strong> to redo</p>
                     <p>• <strong>Ctrl+S</strong> to save</p>
                   </div>
                 </div>
@@ -931,6 +1242,240 @@ export default function FloorPlanEditor({ imageUrl, projectId, onSave }: FloorPl
           </div>
         )}
       </div>
+
+      {/* Onboarding Hint */}
+      {!dismissedOnboarding && mapData && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-40 bg-blue-600 text-white px-4 py-3 rounded-lg shadow-lg max-w-lg">
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <p className="font-medium text-sm">Floor Plan Editor Tips</p>
+              <p className="text-xs text-blue-100 mt-1">
+                {mapData.walls.length > 0
+                  ? `${mapData.walls.length} walls detected. Click to select, drag endpoints to adjust, or use Draw mode to add new walls. Press '?' for all shortcuts.`
+                  : "Use the Draw tool to add walls by clicking and dragging. Press '?' for keyboard shortcuts."
+                }
+              </p>
+            </div>
+            <button
+              onClick={() => setDismissedOnboarding(true)}
+              className="text-blue-200 hover:text-white text-lg leading-none px-1"
+              title="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Keyboard Shortcuts Modal */}
+      {showKeyboardShortcuts && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b">
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <Keyboard className="w-5 h-5" />
+                Keyboard Shortcuts
+              </h3>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowKeyboardShortcuts(false)}
+                className="h-8 w-8 p-0"
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+            <div className="p-4 max-h-96 overflow-y-auto">
+              <div className="space-y-4">
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Selection</h4>
+                  <div className="space-y-1 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Select all walls</span>
+                      <kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs font-mono">Ctrl+A</kbd>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Add to selection</span>
+                      <kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs font-mono">Shift+Click</kbd>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Box select</span>
+                      <span className="text-gray-500 text-xs">Drag on empty area</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Deselect all</span>
+                      <kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs font-mono">Esc</kbd>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Editing</h4>
+                  <div className="space-y-1 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Delete selected</span>
+                      <kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs font-mono">Delete</kbd>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Undo</span>
+                      <kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs font-mono">Ctrl+Z</kbd>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Redo</span>
+                      <kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs font-mono">Ctrl+Shift+Z</kbd>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Redo (alt)</span>
+                      <kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs font-mono">Ctrl+Y</kbd>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">File</h4>
+                  <div className="space-y-1 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Save changes</span>
+                      <kbd className="px-2 py-0.5 bg-gray-100 rounded text-xs font-mono">Ctrl+S</kbd>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Mouse Actions</h4>
+                  <div className="space-y-1 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Draw wall</span>
+                      <span className="text-gray-500 text-xs">Click + drag in Draw mode</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Move wall endpoint</span>
+                      <span className="text-gray-500 text-xs">Drag blue circle</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Move selection</span>
+                      <span className="text-gray-500 text-xs">Drag selected walls</span>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+            <div className="p-3 bg-gray-50 border-t text-center">
+              <span className="text-xs text-gray-500">Press <kbd className="px-1.5 py-0.5 bg-white border rounded text-xs font-mono">?</kbd> or <kbd className="px-1.5 py-0.5 bg-white border rounded text-xs font-mono">Esc</kbd> to close</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Complete Walls Modal */}
+      {showCompleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b">
+              <h3 className="text-lg font-semibold flex items-center gap-2">
+                <Wand2 className="w-5 h-5" />
+                Complete Walls
+              </h3>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={closeCompleteModal}
+                className="h-8 w-8 p-0"
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              {/* Sensitivity Slider */}
+              <div>
+                <div className="flex justify-between items-center mb-2">
+                  <label className="text-sm font-medium">Gap Sensitivity</label>
+                  <span className="text-sm font-mono bg-gray-100 px-2 py-0.5 rounded">
+                    {sensitivity}px
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="10"
+                  max="200"
+                  step="5"
+                  value={sensitivity}
+                  onChange={(e) => handleSensitivityChange(Number(e.target.value))}
+                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                />
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>Conservative (10px)</span>
+                  <span>Aggressive (200px)</span>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  Larger values will close more gaps but may create unwanted connections.
+                </p>
+              </div>
+
+              {/* Preview Stats */}
+              {loadingPreview ? (
+                <div className="bg-gray-50 p-4 rounded-lg text-center">
+                  <div className="animate-spin w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full mx-auto mb-2"></div>
+                  <p className="text-sm text-gray-500">Loading preview...</p>
+                </div>
+              ) : previewData ? (
+                <div className="bg-gray-50 p-4 rounded-lg space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-gray-600">Gaps to close</span>
+                    <span className="text-lg font-semibold text-green-600">
+                      +{previewData.stats.gaps_closed}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center text-sm">
+                    <span className="text-gray-500">Wall count</span>
+                    <span className="font-mono">
+                      {previewData.stats.original_count} → {previewData.stats.final_count}
+                    </span>
+                  </div>
+                  {previewData.stats.gaps_closed === 0 && (
+                    <p className="text-xs text-amber-600 mt-2">
+                      No gaps found at this sensitivity level. Try increasing the value.
+                    </p>
+                  )}
+                </div>
+              ) : null}
+
+              {/* Preview hint */}
+              <div className="text-xs text-gray-500 flex items-center gap-2">
+                <div className="w-6 h-0.5 bg-green-500 rounded"></div>
+                <span>New segments will appear in green on the canvas</span>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex gap-2 p-4 border-t bg-gray-50">
+              <Button
+                variant="outline"
+                onClick={closeCompleteModal}
+                className="flex-1"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleCompleteWalls}
+                disabled={completingWalls || !previewData || previewData.stats.gaps_closed === 0}
+                className="flex-1"
+              >
+                {completingWalls ? (
+                  <>
+                    <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full mr-2"></div>
+                    Applying...
+                  </>
+                ) : (
+                  `Apply ${previewData?.stats.gaps_closed || 0} Changes`
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

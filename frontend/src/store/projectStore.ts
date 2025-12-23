@@ -1,6 +1,15 @@
 import { create } from 'zustand'
 import type { Project, MapData, WallSegment, Room, ForbiddenZone, Router } from '@/types'
 
+// Maximum number of undo/redo states to keep
+const MAX_HISTORY_SIZE = 50
+
+interface HistoryState {
+  walls: WallSegment[]
+  rooms: Room[]
+  forbidden_zones: ForbiddenZone[]
+}
+
 interface ProjectState {
   // Current project
   currentProject: Project | null
@@ -9,6 +18,15 @@ interface ProjectState {
   // Map editing state
   mapData: MapData | null
   setMapData: (mapData: MapData | null) => void
+
+  // Undo/Redo history
+  undoStack: HistoryState[]
+  redoStack: HistoryState[]
+  canUndo: () => boolean
+  canRedo: () => boolean
+  undo: () => void
+  redo: () => void
+  pushToHistory: () => void
 
   // Wall editing
   selectedWallIndex: number | null
@@ -20,7 +38,9 @@ interface ProjectState {
   clearWallSelection: () => void
   addWall: (wall: WallSegment) => void
   updateWall: (index: number, wall: WallSegment) => void
+  updateWallWithHistory: (index: number, wall: WallSegment) => void
   updateWalls: (updates: { index: number; wall: WallSegment }[]) => void
+  updateWallsWithHistory: (updates: { index: number; wall: WallSegment }[]) => void
   deleteWall: (index: number) => void
   deleteSelectedWalls: () => void
 
@@ -72,12 +92,101 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       mapData: project?.map_data || initialMapData,
       scale: project?.scale_meters_per_pixel || 0.05,
       hasUnsavedChanges: false,
+      undoStack: [],
+      redoStack: [],
     })
   },
 
   // Map data
   mapData: null,
   setMapData: (mapData) => set({ mapData, hasUnsavedChanges: true }),
+
+  // Undo/Redo history
+  undoStack: [],
+  redoStack: [],
+
+  canUndo: () => get().undoStack.length > 0,
+  canRedo: () => get().redoStack.length > 0,
+
+  pushToHistory: () => {
+    const { mapData, undoStack } = get()
+    if (!mapData) return
+
+    const currentState: HistoryState = {
+      walls: JSON.parse(JSON.stringify(mapData.walls)),
+      rooms: JSON.parse(JSON.stringify(mapData.rooms)),
+      forbidden_zones: JSON.parse(JSON.stringify(mapData.forbidden_zones)),
+    }
+
+    const newStack = [...undoStack, currentState]
+    if (newStack.length > MAX_HISTORY_SIZE) {
+      newStack.shift()
+    }
+
+    set({ undoStack: newStack, redoStack: [] })
+  },
+
+  undo: () => {
+    const { mapData, undoStack, redoStack } = get()
+    if (!mapData || undoStack.length === 0) return
+
+    // Save current state to redo stack
+    const currentState: HistoryState = {
+      walls: JSON.parse(JSON.stringify(mapData.walls)),
+      rooms: JSON.parse(JSON.stringify(mapData.rooms)),
+      forbidden_zones: JSON.parse(JSON.stringify(mapData.forbidden_zones)),
+    }
+
+    // Pop last state from undo stack
+    const newUndoStack = [...undoStack]
+    const previousState = newUndoStack.pop()!
+
+    set({
+      mapData: {
+        ...mapData,
+        walls: previousState.walls,
+        rooms: previousState.rooms,
+        forbidden_zones: previousState.forbidden_zones,
+      },
+      undoStack: newUndoStack,
+      redoStack: [...redoStack, currentState],
+      hasUnsavedChanges: true,
+      selectedWallIndex: null,
+      selectedWallIndices: [],
+      selectedRoomIndex: null,
+    })
+  },
+
+  redo: () => {
+    const { mapData, undoStack, redoStack } = get()
+    if (!mapData || redoStack.length === 0) return
+
+    // Save current state to undo stack
+    const currentState: HistoryState = {
+      walls: JSON.parse(JSON.stringify(mapData.walls)),
+      rooms: JSON.parse(JSON.stringify(mapData.rooms)),
+      forbidden_zones: JSON.parse(JSON.stringify(mapData.forbidden_zones)),
+    }
+
+    // Pop last state from redo stack
+    const newRedoStack = [...redoStack]
+    const nextState = newRedoStack.pop()!
+
+    set({
+      mapData: {
+        ...mapData,
+        walls: nextState.walls,
+        rooms: nextState.rooms,
+        forbidden_zones: nextState.forbidden_zones,
+      },
+      undoStack: [...undoStack, currentState],
+      redoStack: newRedoStack,
+      hasUnsavedChanges: true,
+      selectedWallIndex: null,
+      selectedWallIndices: [],
+      selectedRoomIndex: null,
+    })
+  },
 
   // Wall editing
   selectedWallIndex: null,
@@ -111,9 +220,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   clearWallSelection: () => set({ selectedWallIndices: [], selectedWallIndex: null }),
 
   addWall: (wall) => {
-    const { mapData } = get()
+    const { mapData, pushToHistory } = get()
     if (!mapData) return
 
+    pushToHistory()
     set({
       mapData: {
         ...mapData,
@@ -127,6 +237,24 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const { mapData } = get()
     if (!mapData) return
 
+    const newWalls = [...mapData.walls]
+    newWalls[index] = wall
+
+    set({
+      mapData: {
+        ...mapData,
+        walls: newWalls,
+      },
+      hasUnsavedChanges: true,
+    })
+  },
+
+  // Push history before starting a wall update sequence (call before drag starts)
+  updateWallWithHistory: (index: number, wall: WallSegment) => {
+    const { mapData, pushToHistory } = get()
+    if (!mapData) return
+
+    pushToHistory()
     const newWalls = [...mapData.walls]
     newWalls[index] = wall
 
@@ -157,10 +285,31 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     })
   },
 
-  deleteWall: (index) => {
-    const { mapData, selectedWallIndex, selectedWallIndices } = get()
+  // Push history before starting a multi-wall update sequence
+  updateWallsWithHistory: (updates: { index: number; wall: WallSegment }[]) => {
+    const { mapData, pushToHistory } = get()
     if (!mapData) return
 
+    pushToHistory()
+    const newWalls = [...mapData.walls]
+    updates.forEach(({ index, wall }) => {
+      newWalls[index] = wall
+    })
+
+    set({
+      mapData: {
+        ...mapData,
+        walls: newWalls,
+      },
+      hasUnsavedChanges: true,
+    })
+  },
+
+  deleteWall: (index) => {
+    const { mapData, selectedWallIndex, selectedWallIndices, pushToHistory } = get()
+    if (!mapData) return
+
+    pushToHistory()
     set({
       mapData: {
         ...mapData,
@@ -173,9 +322,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   deleteSelectedWalls: () => {
-    const { mapData, selectedWallIndices } = get()
+    const { mapData, selectedWallIndices, pushToHistory } = get()
     if (!mapData || selectedWallIndices.length === 0) return
 
+    pushToHistory()
     const newWalls = mapData.walls.filter((_, i) => !selectedWallIndices.includes(i))
 
     set({
@@ -194,9 +344,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setSelectedRoomIndex: (index) => set({ selectedRoomIndex: index }),
 
   addRoom: (room) => {
-    const { mapData } = get()
+    const { mapData, pushToHistory } = get()
     if (!mapData) return
 
+    pushToHistory()
     set({
       mapData: {
         ...mapData,
@@ -223,9 +374,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   deleteRoom: (index) => {
-    const { mapData, selectedRoomIndex } = get()
+    const { mapData, selectedRoomIndex, pushToHistory } = get()
     if (!mapData) return
 
+    pushToHistory()
     set({
       mapData: {
         ...mapData,
@@ -238,9 +390,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   // Forbidden zone editing
   addForbiddenZone: (zone) => {
-    const { mapData } = get()
+    const { mapData, pushToHistory } = get()
     if (!mapData) return
 
+    pushToHistory()
     set({
       mapData: {
         ...mapData,
@@ -251,9 +404,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   deleteForbiddenZone: (index) => {
-    const { mapData } = get()
+    const { mapData, pushToHistory } = get()
     if (!mapData) return
 
+    pushToHistory()
     set({
       mapData: {
         ...mapData,
@@ -301,5 +455,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     drawingMode: 'select',
     scale: 0.05,
     hasUnsavedChanges: false,
+    undoStack: [],
+    redoStack: [],
   }),
 }))

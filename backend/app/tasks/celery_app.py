@@ -14,7 +14,8 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=[
         'app.tasks.optimization_task',
-        'app.tasks.map_processing_task'
+        'app.tasks.map_processing_task',
+        'app.tasks.llm_processing_task'
     ]
 )
 

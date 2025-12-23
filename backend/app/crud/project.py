@@ -155,3 +155,27 @@ def update_processing_status(
     db.commit()
     db.refresh(db_project)
     return db_project
+
+
+def update_project_llm_layout(
+    db: Session,
+    project_id: UUID,
+    html_layout: str,
+    svg_layout: str
+) -> Optional[Project]:
+    """Update a project's LLM-generated layout data."""
+    db_project = get_project(db, project_id)
+    if not db_project:
+        return None
+
+    # Store layouts in a metadata field or extended map_data
+    current_map_data = db_project.map_data or {}
+    current_map_data["llm_layout"] = {
+        "html": html_layout,
+        "svg": svg_layout
+    }
+    db_project.map_data = current_map_data
+
+    db.commit()
+    db.refresh(db_project)
+    return db_project

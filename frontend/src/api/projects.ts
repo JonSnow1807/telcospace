@@ -122,6 +122,21 @@ export async function reprocessProject(
   return response.data
 }
 
+export interface LayoutResponse {
+  layout: string
+  format: 'svg' | 'html'
+}
+
+export async function fetchProjectLayout(
+  projectId: string,
+  format: 'svg' | 'html' = 'svg'
+): Promise<LayoutResponse> {
+  const response = await apiClient.get<LayoutResponse>(
+    `/api/v1/projects/${projectId}/layout?format=${format}`
+  )
+  return response.data
+}
+
 // Bundled API object for convenience
 export const projectsApi = {
   fetchProjects,
@@ -133,4 +148,5 @@ export const projectsApi = {
   uploadProjectImage,
   fetchProcessingStatus,
   reprocessProject,
+  fetchProjectLayout,
 }

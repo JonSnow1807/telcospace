@@ -119,6 +119,14 @@ try:
 except ImportError:
     HYBRID_BOUNDARY_AVAILABLE = False
 
+# LLM Floor Plan Agent (Google Gemini - fastest and most accurate)
+try:
+    from app.services.llm_floor_plan_agent import GeminiFloorPlanAgent
+    LLM_AGENT_AVAILABLE = True
+except ImportError as e:
+    LLM_AGENT_AVAILABLE = False
+    logger.warning(f"LLM Floor Plan Agent not available: {e}")
+
 from app.core.config import settings
 
 # Supported file extensions
@@ -168,6 +176,18 @@ class FloorPlanProcessor:
         # Get detection mode from config
         detection_mode = getattr(settings, 'WALL_DETECTION_MODE', 'hybrid').lower()
         logger.info(f"Wall detection mode from config: {detection_mode}")
+
+        # LLM Floor Plan Agent (Google Gemini - fastest and most accurate)
+        self.use_llm = (detection_mode == 'llm') and LLM_AGENT_AVAILABLE
+        self.llm_agent = None
+
+        if self.use_llm:
+            try:
+                self.llm_agent = GeminiFloorPlanAgent()
+                logger.info("LLM Floor Plan Agent enabled (PRIMARY - Google Gemini 2.0 Flash)")
+            except Exception as e:
+                logger.warning(f"LLM Agent not available: {e}")
+                self.use_llm = False
 
         # Canny Boundary (pure CV - stable, no external APIs)
         self.use_canny_boundary = (detection_mode == 'hybrid') and CANNY_BOUNDARY_AVAILABLE
@@ -507,8 +527,55 @@ class FloorPlanProcessor:
         detection_method = None
         walls = None
 
+        # Priority -1: LLM (Google Gemini - fastest and most accurate)
+        if self.use_llm and self.llm_agent:
+            progress_callback(55, "Analyzing floor plan with AI (Gemini 2.0 Flash)...")
+            try:
+                logger.info(f"Calling LLM Floor Plan Agent with image: {file_path}")
+                result = self.llm_agent.process(file_path)
+                
+                if result and result.get("map_data"):
+                    map_data_dict = result["map_data"]
+                    walls = map_data_dict.get("walls", [])
+                    rooms = map_data_dict.get("rooms", [])
+                    
+                    if walls and len(walls) > 0:
+                        detection_method = "llm_gemini"
+                        logger.info(f"LLM detected {len(walls)} walls, {len(rooms)} rooms")
+                        
+                        # Build MapData directly from LLM result
+                        map_data = MapData(
+                            dimensions=MapDimensions(width=width, height=height),
+                            walls=walls,
+                            rooms=[Room(**r) for r in rooms] if rooms else [],
+                            forbidden_zones=[]
+                        )
+                        
+                        progress_callback(100, "LLM floor plan analysis complete")
+                        
+                        return ProcessingResult(
+                            map_data=map_data,
+                            detected_scale=scale,
+                            scale_confidence=scale_confidence,
+                            scale_method=scale_method,
+                            room_labels=room_labels if room_labels else None,
+                            dimensions=dimensions if dimensions else None,
+                            openings=openings if openings else None,
+                            warnings=warnings if warnings else None
+                        )
+                    else:
+                        walls = None
+                        logger.warning("LLM returned empty walls, falling back to CV")
+                else:
+                    logger.warning("LLM returned no map_data, falling back to CV")
+            except Exception as e:
+                import traceback
+                logger.error(f"LLM Floor Plan Agent failed: {e}")
+                logger.error(traceback.format_exc())
+                walls = None
+
         # Priority 0: Canny Boundary (pure CV - stable and reliable)
-        if self.use_canny_boundary and self.canny_boundary_detector:
+        if walls is None and self.use_canny_boundary and self.canny_boundary_detector:
             progress_callback(55, "Detecting walls with Canny boundary...")
             try:
                 logger.info(f"Calling Canny Boundary detector with scale={scale}")

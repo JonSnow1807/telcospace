@@ -18,6 +18,14 @@ build/
 .env.local
 *.env
 
+# Credentials and service account keys
+info.json
+backend/info.json
+**/info.json
+*-credentials.json
+*-service-account.json
+*.pem
+
 # IDE
 .idea/
 .vscode/

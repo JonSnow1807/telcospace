@@ -11,13 +11,17 @@ import {
   Ban,
   Sparkles,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  ToggleLeft,
+  ToggleRight
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import FloorPlanEditor from '@/components/FloorPlanEditor'
+import SVGFloorPlanEditor from '@/components/SVGFloorPlanEditor'
+import HTMLFloorPlanViewer from '@/components/HTMLFloorPlanViewer'
 import ProcessingStatus from '@/components/ProcessingStatus'
 import { fetchProject, updateProjectMap, reprocessProject } from '@/api/projects'
 import { useProjectStore } from '@/store/projectStore'
@@ -39,6 +43,7 @@ export default function ProjectPage() {
   } = useProjectStore()
 
   const [showSettings, setShowSettings] = useState(false)
+  const [editorMode, setEditorMode] = useState<'html' | 'svg' | 'canvas'>('html') // Default to HTML viewer
 
   // Fetch project data
   const { data: project, isLoading, error, refetch } = useQuery({
@@ -316,39 +321,102 @@ export default function ProjectPage() {
                 Floor Plan Editor
               </CardTitle>
               <CardDescription>
-                Draw walls, define rooms, and mark forbidden zones
+                {editorMode === 'html' 
+                  ? 'LLM-generated layout - View AI-detected walls and rooms'
+                  : editorMode === 'svg' 
+                  ? 'SVG editor - Edit walls and materials directly'
+                  : 'Canvas editor - Draw walls and define rooms manually'}
               </CardDescription>
             </div>
-            <div className="flex items-center gap-2 text-xs text-gray-500">
-              <span className="flex items-center gap-1">
-                <div className="w-3 h-3 rounded bg-gray-800" />
-                Walls
-              </span>
-              <span className="flex items-center gap-1">
-                <div className="w-3 h-3 rounded bg-blue-400/50" />
-                Rooms
-              </span>
-              <span className="flex items-center gap-1">
-                <div className="w-3 h-3 rounded bg-red-400/50" />
-                Forbidden
-              </span>
+            <div className="flex items-center gap-4">
+              {/* Editor Toggle */}
+              <div className="flex items-center gap-2 bg-gray-100 rounded-lg p-1">
+                <button
+                  onClick={() => setEditorMode('html')}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                    editorMode === 'html'
+                      ? 'bg-white text-blue-600 shadow-sm'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  AI View
+                </button>
+                <button
+                  onClick={() => setEditorMode('svg')}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                    editorMode === 'svg'
+                      ? 'bg-white text-blue-600 shadow-sm'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => setEditorMode('canvas')}
+                  className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                    editorMode === 'canvas'
+                      ? 'bg-white text-blue-600 shadow-sm'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Canvas
+                </button>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-gray-500">
+                <span className="flex items-center gap-1">
+                  <div className="w-3 h-3 rounded bg-gray-800" />
+                  Walls
+                </span>
+                <span className="flex items-center gap-1">
+                  <div className="w-3 h-3 rounded bg-blue-400/50" />
+                  Rooms
+                </span>
+                <span className="flex items-center gap-1">
+                  <div className="w-3 h-3 rounded bg-red-400/50" />
+                  Forbidden
+                </span>
+              </div>
             </div>
           </div>
         </CardHeader>
         <CardContent className="p-0">
           <div className="h-[600px]">
-            <FloorPlanEditor
-              imageUrl={
-                project.map_image_path
-                  ? `${import.meta.env.VITE_API_URL || 'http://localhost:8000'}${project.map_image_path}`
-                  : undefined
-              }
-              projectId={projectId}
-              onSave={() => {
-                queryClient.invalidateQueries({ queryKey: ['project', projectId] })
-                toast({ title: 'Saved', description: 'Floor plan changes saved successfully' })
-              }}
-            />
+            {editorMode === 'html' ? (
+              <HTMLFloorPlanViewer
+                imageUrl={
+                  project.map_image_path
+                    ? `${import.meta.env.VITE_API_URL || 'http://localhost:8000'}${project.map_image_path}`
+                    : undefined
+                }
+                projectId={projectId}
+              />
+            ) : editorMode === 'svg' ? (
+              <SVGFloorPlanEditor
+                imageUrl={
+                  project.map_image_path
+                    ? `${import.meta.env.VITE_API_URL || 'http://localhost:8000'}${project.map_image_path}`
+                    : undefined
+                }
+                projectId={projectId}
+                onSave={() => {
+                  queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+                  toast({ title: 'Saved', description: 'Floor plan changes saved successfully' })
+                }}
+              />
+            ) : (
+              <FloorPlanEditor
+                imageUrl={
+                  project.map_image_path
+                    ? `${import.meta.env.VITE_API_URL || 'http://localhost:8000'}${project.map_image_path}`
+                    : undefined
+                }
+                projectId={projectId}
+                onSave={() => {
+                  queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+                  toast({ title: 'Saved', description: 'Floor plan changes saved successfully' })
+                }}
+              />
+            )}
           </div>
         </CardContent>
       </Card>

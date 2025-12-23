@@ -16,11 +16,15 @@ class Settings(BaseSettings):
     # AI/LLM (for AI-powered wall detection)
     ANTHROPIC_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
+    
+    # Google Service Account credentials path (for Gemini)
+    GOOGLE_CREDENTIALS_PATH: Optional[str] = None
 
     # AI Model Selection: "opus" for max accuracy, "sonnet" for speed/cost balance
     AI_WALL_DETECTION_MODEL: str = "opus"  # Options: "opus", "sonnet"
 
     # Wall Detection Mode - choose the approach that works best for your floor plans:
+    # - "llm" (NEW): Use Google Gemini LLM to analyze floor plans and generate HTML layouts
     # - "hybrid": Contour boundary + Rasterscan interior (DEFAULT - best overall accuracy)
     # - "rasterscan": HuggingFace Space API (interior walls only)
     # - "deepfloorplan": Pre-trained TFLite model (local, no API needed)
@@ -30,7 +34,7 @@ class Settings(BaseSettings):
     # - "combined": AI + Morphological merged
     # - "ai_vision": Direct Claude Vision detection
     # - "cv": Basic Hough transform fallback
-    WALL_DETECTION_MODE: str = "hybrid"
+    WALL_DETECTION_MODE: str = "llm"  # Changed default to LLM mode
 
     # Database
     DATABASE_URL: str = "postgresql://router_user:router_password@localhost:5432/router_optimizer"

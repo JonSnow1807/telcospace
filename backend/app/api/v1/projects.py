@@ -162,10 +162,10 @@ async def create_project(
 
     project = project_crud.create_project(db, project_data, static_path)
 
-    # Trigger async processing if enabled
+    # Trigger async processing if enabled - use LLM-based processing
     if auto_process:
-        from app.tasks.map_processing_task import process_floor_plan
-        process_floor_plan.delay(str(project.id), full_path, scale)
+        from app.tasks.llm_processing_task import process_floor_plan_llm
+        process_floor_plan_llm.delay(str(project.id), full_path, scale)
 
     return project
 
@@ -324,9 +324,9 @@ async def reprocess_project(
     # Get full file path from static path
     full_path = os.path.join(settings.STATIC_PATH, project.map_image_path.lstrip("/static/"))
 
-    # Trigger async processing
-    from app.tasks.map_processing_task import process_floor_plan
-    process_floor_plan.delay(str(project.id), full_path, scale)
+    # Trigger LLM-based async processing
+    from app.tasks.llm_processing_task import process_floor_plan_llm
+    process_floor_plan_llm.delay(str(project.id), full_path, scale)
 
     return ProcessingStatus(
         status="pending",
@@ -335,6 +335,39 @@ async def reprocess_project(
         scale_confidence=None,
         error=None
     )
+
+
+@router.get("/{project_id}/layout")
+async def get_project_layout(
+    project_id: UUID,
+    format: str = Query("svg", description="Layout format: 'svg' or 'html'"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the LLM-generated layout for a project.
+    
+    Returns the SVG or HTML representation of the floor plan
+    that can be edited in the frontend.
+    
+    - **format**: 'svg' for SVG markup only, 'html' for full HTML document
+    """
+    project = project_crud.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    map_data = project.map_data or {}
+    llm_layout = map_data.get("llm_layout", {})
+    
+    if not llm_layout:
+        raise HTTPException(
+            status_code=404, 
+            detail="No LLM layout available. Process the floor plan first."
+        )
+    
+    if format == "html":
+        return {"layout": llm_layout.get("html", ""), "format": "html"}
+    else:
+        return {"layout": llm_layout.get("svg", ""), "format": "svg"}
 
 
 @router.post("/{project_id}/image", response_model=Project)
